@@ -12,12 +12,12 @@ from imitation.util.logger import configure
 
 
 def main():
-    """Run a simple NTRIL example on CartPole."""
-    print("Running NTRIL example on CartPole-v1...")
+    """Run a simple NTRIL example on Mountain Car Continuous."""
+    print("Running NTRIL example on MountainCarContinuous-v0...")
     
     # Setup environment
     def make_env():
-        return gym.make("CartPole-v1")
+        return gym.make("MountainCarContinuous-v0")
     
     venv = DummyVecEnv([make_env])
     
