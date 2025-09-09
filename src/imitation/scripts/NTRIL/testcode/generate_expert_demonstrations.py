@@ -3,23 +3,26 @@
 import numpy as np
 import gymnasium as gym
 import osqp
+import hypothesis
+import hypothesis.strategies as st
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from imitation.data import rollout
 from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.scripts.NTRIL.utils import visualize_noise_levels, analyze_ranking_quality
+from imitation.data.wrappers import RolloutInfoWrapper
+from imitation.util import logger, util
 from imitation.util.logger import configure
 
 def main():
     """Generate expert demonstration on Mountain Car Continuous."""
     print("Generating expert demonstrations on MountainCarContinuous-v0...")
     
-    # Setup environment
-    def make_env():
-        return gym.make("MountainCarContinuous-v0")
+    rngs = np.random.default_rng()
     
-    venv = DummyVecEnv([make_env])
+    # Setup environment
+    venv = util.make_vec_env("Pendulum-v1", rng=rngs)
     
     # Train expert policy (or load pre-trained)
     print("Training expert policy...")
@@ -32,6 +35,11 @@ def main():
         expert_policy,
         venv,
         rollout.make_sample_until(min_episodes=10),
+        post_wrappers = RolloutInfoWrapper(venv),
+        rng=rngs
     )
     
     print(f"Generated {len(expert_trajectories)} expert trajectories")
+
+if __name__ == "__main__":
+    main()
