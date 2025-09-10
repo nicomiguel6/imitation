@@ -1,6 +1,7 @@
 """Code for testing and debugging NTRIL. Step 1: Generating expert policies."""
 
 import numpy as np
+import os
 import gymnasium as gym
 import osqp
 import hypothesis
@@ -18,16 +19,28 @@ from imitation.util.logger import configure
 def main():
     """Generate expert demonstration on Mountain Car Continuous."""
     print("Generating expert demonstrations on MountainCarContinuous-v0...")
+
+    # Path to save/load the model
+    model_path = "expert_policy.zip"
     
+
     rngs = np.random.default_rng()
     
     # Setup environment
-    venv = util.make_vec_env("Pendulum-v1", rng=rngs)
+    venv = util.make_vec_env("MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
     
-    # Train expert policy (or load pre-trained)
-    print("Training expert policy...")
-    expert_policy = PPO("MlpPolicy", venv, verbose=0)
-    expert_policy.learn(total_timesteps=10000)
+    if os.path.exists(model_path):
+        print(f"Loading existing model from {model_path}...")
+        expert_policy = PPO.load(model_path, env=venv)
+    else:
+        # Train expert policy (or load pre-trained)
+        print("Training expert policy...")
+        expert_policy = PPO("MlpPolicy", venv, verbose=0)
+        expert_policy.learn(total_timesteps=10000)
+
+        # Save trained model
+        expert_policy.save(model_path)
+
     
     # Generate expert demonstrations
     print("Generating expert demonstrations...")
@@ -35,7 +48,6 @@ def main():
         expert_policy,
         venv,
         rollout.make_sample_until(min_episodes=10),
-        post_wrappers = RolloutInfoWrapper(venv),
         rng=rngs
     )
     
