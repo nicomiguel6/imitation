@@ -15,6 +15,7 @@ from imitation.scripts.NTRIL.utils import visualize_noise_levels, analyze_rankin
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.util import logger, util
 from imitation.util.logger import configure
+from imitation.data import serialize
 
 def main():
     """Generate expert demonstration on Mountain Car Continuous."""
@@ -52,6 +53,10 @@ def main():
     )
     
     print(f"Generated {len(expert_trajectories)} expert trajectories")
+    # Save expert trajectories
+    traj_path = "expert_traj"
+    serialize.save(traj_path, expert_trajectories)
+    print(f"Expert trajectories saved to {traj_path}")
 
 if __name__ == "__main__":
     main()
