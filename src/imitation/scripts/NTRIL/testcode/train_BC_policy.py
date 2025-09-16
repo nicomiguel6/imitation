@@ -45,10 +45,5 @@ def main():
     util.save_policy(bc_policy.policy, policy_path)
     
 
-
-
-
-
-
 if __name__ == "__main__":
     main()
