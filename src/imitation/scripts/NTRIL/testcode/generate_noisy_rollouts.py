@@ -10,6 +10,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from imitation.data import rollout
+from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector, NoisyPolicy
 from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.scripts.NTRIL.utils import visualize_noise_levels, analyze_ranking_quality
 from imitation.algorithms import bc
@@ -25,14 +26,27 @@ def main():
     policy_path = "BC_policy"
     bc_policy = bc.reconstruct_policy(policy_path, device="cuda")
 
+    """Noise Injector"""
+    epsilon = 0.5
+    injector = EpsilonGreedyNoiseInjector()
+
+    """Rollout trajectory"""
+    noisy_bc_policy = injector.inject_noise(bc_policy, noise_level=epsilon)
+
+    """Generate environment"""
+    rngs = np.random.default_rng()
     
-
-
-
-
-
-
-
+    # Setup environment
+    venv = util.make_vec_env("MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
+    
+    # Generate expert demonstrations
+    print("Generating expert demonstrations...")
+    expert_trajectories = rollout.rollout(
+        noisy_bc_policy,
+        venv,
+        rollout.make_sample_until(min_episodes=10),
+        rng=rngs
+    )
 
 
 

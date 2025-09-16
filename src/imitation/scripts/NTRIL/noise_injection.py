@@ -29,6 +29,10 @@ class BaseNoiseInjector(abc.ABC):
         Returns:
             A new policy with noise injected
         """
+        # create noise injector
+
+
+        return NoisyPolicy(policy, )
 
 
 class GaussianActionNoiseInjector(BaseNoiseInjector):
@@ -124,6 +128,48 @@ class ParameterNoiseInjector(BaseNoiseInjector):
         
         noisy_policy.load_state_dict(state_dict)
         return noisy_policy
+    
+class EpsilonGreedyNoiseInjector(BaseNoiseInjector):
+    """Injects epsilon-greedy noise into policy actions."""
+
+    def inject_noise(
+        self,
+        policy: policies.BasePolicy,
+        noise_level: float,
+    ) -> policies.BasePolicy:
+        """Inject epsilon-greedy noise into policy actions."""
+        return NoisyPolicy(
+            base_policy=policy,
+            noise_injector=self,
+            noise_level=noise_level,
+        )
+
+    def apply_noise(
+        self,
+        base_action: th.Tensor,
+        action_space: gym.Space,
+        noise_level: float,
+    ) -> th.Tensor:
+        """With probability epsilon, return a random action; else, return base_action."""
+        if np.random.rand() < noise_level:
+            if isinstance(action_space, gym.spaces.Box):
+                random_action = th.from_numpy(
+                    np.random.uniform(
+                        low=action_space.low,
+                        high=action_space.high,
+                        size=base_action.shape
+                    )
+                ).to(base_action.device, dtype=base_action.dtype)
+            elif isinstance(action_space, gym.spaces.Discrete):
+                random_action = th.tensor(
+                    np.random.randint(action_space.n, size=base_action.shape),
+                    device=base_action.device,
+                    dtype=base_action.dtype,
+                )
+            else:
+                raise NotImplementedError("Epsilon-greedy not implemented for this action space.")
+            return random_action
+        return base_action
 
 
 class NoisyPolicy(policies.BasePolicy):
@@ -161,47 +207,19 @@ class NoisyPolicy(policies.BasePolicy):
         deterministic: bool = False,
     ) -> th.Tensor:
         """Predict action with noise injection."""
-        # Get base action
         base_action = self.base_policy._predict(observation, deterministic)
-        
-        if self.noise_level == 0.0 or deterministic:
+
+        if self.noise_level == 0.0 or deterministic or self.noise_injector is None:
             return base_action
-        
-        # Add noise based on injector type
-        if isinstance(self.noise_injector, GaussianActionNoiseInjector):
-            noise_std = self.noise_level * self.noise_injector.noise_std_scale
-            if isinstance(self.action_space, gym.spaces.Box):
-                action_range = self.action_space.high - self.action_space.low
-                noise_std *= action_range
-            
-            noise = th.randn_like(base_action) * noise_std
-            noisy_action = base_action + noise
-            
-        elif isinstance(self.noise_injector, UniformActionNoiseInjector):
-            noise_range = self.noise_level * self.noise_injector.noise_range_scale
-            if isinstance(self.action_space, gym.spaces.Box):
-                action_range = self.action_space.high - self.action_space.low
-                noise_range *= action_range
-            
-            noise = (th.rand_like(base_action) - 0.5) * 2 * noise_range
-            noisy_action = base_action + noise
-            
-        else:
-            # Fallback to Gaussian noise
-            noise_std = self.noise_level * 0.1
-            noise = th.randn_like(base_action) * noise_std
-            noisy_action = base_action + noise
-        
-        # Clip actions if needed
-        if (isinstance(self.action_space, gym.spaces.Box) and 
-            getattr(self.noise_injector, 'clip_actions', True)):
-            noisy_action = th.clamp(
-                noisy_action,
-                th.tensor(self.action_space.low),
-                th.tensor(self.action_space.high),
+
+        # Use the noise injector's apply_noise method if it exists
+        if hasattr(self.noise_injector, "apply_noise"):
+            return self.noise_injector.apply_noise(
+                base_action, self.action_space, self.noise_level
             )
-        
-        return noisy_action
+        else:
+            # fallback: return base_action (or implement other noise logic)
+            return base_action
     
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         """Forward pass through the policy."""
