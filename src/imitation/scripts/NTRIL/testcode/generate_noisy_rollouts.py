@@ -1,4 +1,4 @@
-"""Code for testing and debugging NTRIL. Step 3: Generating noisy rollouts."""
+"""Code for testing and debugging NTRIL. Step 2: Generating noisy rollouts."""
 
 import numpy as np
 import os
@@ -23,7 +23,7 @@ from imitation.data import serialize
 def main():
 
     """Load BC policy"""
-    policy_path = "BC_policy"
+    policy_path = "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/BC_policy"
     bc_policy = bc.reconstruct_policy(policy_path, device="cuda")
 
     """Noise Injector"""
