@@ -1,0 +1,29 @@
+name: env
+channels:
+  - default
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - matplotlib
+  - casadi>=3.6.0
+  - onnx
+  - ipython
+  - jupyter
+  - sphinx
+  - nbsphinx
+  - pygments
+  - docutils
+  - sphinx-copybutton
+  - sphinx-autodoc-typehints
+  - sphinx-book-theme
+  - graphviz
+  - myst-parser
+  - packaging
+  - asyncua
+  - pandas
+  - torch>2.0.0
+
+  # install with:
+  # conda env create --prefix ./.venv -f .conda.yml  
