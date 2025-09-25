@@ -22,6 +22,15 @@ from imitation.data import serialize
 
 def main():
 
+    # Set up discrete linear system
+    A = np.array([[1,1],[0,1]])
+    B = np.array([[0.5], [1]])
+    Q = np.diag([1,1])
+    R = 0.1
+
+    W_vertex = np.array([0.15, 0.15],[0.15, -0.15],[-0.15,-0.15],[-0.15,0.15])
+    W = Polyhedron(W_vertex)
+
     
 
     
