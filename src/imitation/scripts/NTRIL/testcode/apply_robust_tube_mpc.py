@@ -32,6 +32,10 @@ def main():
     R = 0.1
 
     P = solve_discrete_are(A, B, Q, R)
+    K = -np.linalg.inv(B.T @ P @ B + R) @ (B.T @ P @ A)  # LQR gain
+
+    # closed loop
+    Ak = A + B@K
 
     # Set up disturbance with cdd
     W_vertex = np.array([[0.15, 0.15],[0.15, -0.15],[-0.15,-0.15],[-0.15,0.15]], dtype=object)
@@ -43,6 +47,14 @@ def main():
 
     W = cdd.Polyhedron(gen_mat)
     W_polyhedron = Polyhedron(V = W_vertex)
+
+    # Convert to H-rep (Ax <= b)
+    H = W_poly.get_inequalities()
+    H_mat = np.array([list(row) for row in H], dtype=float)
+    W_b, W_A = H_mat[:,0], -H_mat[:,1:]
+
+    # Compute mrpi set
+    V_F = compute_mrpi(Ak, W_A, W_b)
 
     # Set up discrete disturbed linear system
     model_type = 'discrete'
@@ -76,13 +88,24 @@ def main():
 
     mpc.set_objective(mterm=mterm, lterm=lterm)
 
-    max_x = np.array([[0.15], [0.15]])
 
-    mpc.bounds['lower', '_x', 'x'] = -np.array([[-10.0], [-2.0]])
+
+    mpc.bounds['lower', '_x', 'x'] = np.array([[-10.0], [-2.0]])
     mpc.bounds['upper', '_x', 'x'] = np.array([[2.0], [2.0]])
 
     mpc.bounds['lower', '_u', 'u'] = np.array([-1.0])
     mpc.bounds['upper', '_u', 'u'] = np.array([1.0])
+
+    A_x, b_x = box_to_Ab(np.array([[-10.0], [-2.0]]), np.array([[2.0], [2.0]]))
+    A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
+
+
+    tvp_template = mpc.get_tvp_template()
+
+    def tube_constraints(t_now):
+        tvp_template['_tvp', 'x_upper'] = 
+
+
 
     mpc.setup()
 
@@ -98,7 +121,7 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x,1])
-    x0 = np.random.uniform(-3*e,3*e) # Values between +3 and +3 for all states
+    x0 = np.random.uniform(-3*e,3*e) # Values between -3 and +3 for all states
     mpc.x0 = x0
     simulator.x0 = x0
     estimator.x0 = x0
@@ -112,7 +135,16 @@ def main():
         y_next = simulator.make_step(u0)
         x0 = estimator.make_step(y_next)
 
-    tr = 5
+    from matplotlib import rcParams
+    rcParams['axes.grid'] = True
+    rcParams['font.size'] = 18
+
+    import matplotlib.pyplot as plt
+    fig, ax, graphics = do_mpc.graphics.default_plot(mpc.data, figsize=(16,9))
+    graphics.plot_results()
+    graphics.reset_axes()
+    plt.show()
+
 
 
 
@@ -182,6 +214,145 @@ def sample_from_disturbance(W_polyhedron, n_samples=1):
             samples.append(candidate)
     
     return np.array(samples) if n_samples > 1 else samples[0]
+
+def support_function(A, b, d):
+    # cdd wants [b | A] with inequalities in form b + A x >= 0
+    mat = cdd.Matrix(
+        np.hstack([b.reshape(-1,1), -A]).tolist(),
+        number_type="fraction"
+    )
+    mat.rep_type = cdd.RepType.INEQUALITY
+    poly = cdd.Polyhedron(mat)
+
+    verts = poly.get_generators()
+    V = np.array([row[1:] for row in verts if row[0] == 1], dtype=float)
+
+    return np.max(V @ d)
+
+def minkowski_sum(V1, V2):
+    """
+    Approximate Minkowski sum of two polytopes in V-rep:
+    P = conv(V1), Q = conv(V2)
+    return conv(V1 + V2)
+    """
+    V_sum = np.array([v1 + v2 for v1 in V1 for v2 in V2])
+    # Convex hull via cdd
+    mat = cdd.Matrix(
+        np.hstack([np.ones((V_sum.shape[0],1)), V_sum]).tolist(),
+        number_type="fraction"
+    )
+    mat.rep_type = cdd.RepType.GENERATOR
+    P = cdd.Polyhedron(mat)
+    verts = P.get_generators()
+
+    return np.array([row[1:] for row in verts if row[0] == 1], dtype=float)
+
+def minkowski_difference(Ax, bx, V_F):
+    """
+    Compute X ⊖ F where
+      X = {x | Ax x <= bx}
+      F = conv(V_F) given in V-rep (vertices)
+    Returns (A_diff, b_diff) for tightened polytope
+    """
+    b_new = []
+    for i in range(Ax.shape[0]):
+        a = Ax[i,:]
+        # support of F in direction a
+        hF = np.max(V_F @ a)
+        b_new.append(bx[i] - hF)
+
+    return Ax, np.array(b_new)
+
+def compute_mrpi(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
+    """
+    Compute outer approximation of mRPI set for e^+ = A e + w, w in W.
+    Inputs:
+        Ak : closed-loop matrix
+        W_A, W_b : polytope in H-rep (W = {x | W_A x <= W_b})
+        epsilon : tolerance
+    Returns:
+        V_F : vertices of approximate mRPI set
+    """
+    nx = Ak.shape[0]
+    s = 0
+    alpha, Ms = 1000, 1000
+
+    # Step 1: find s such that alpha small enough
+    while alpha > epsilon/(epsilon + Ms) and s < max_iter:
+        s += 1
+        # Compute alpha
+        dirs = (Ak**s) @ W_A.T  # directions = A^s * facet normals
+        alpha = np.max([support_function(W_A, W_b, d) / bi
+                        for d, bi in zip(dirs, W_b)])
+
+        # Update Ms
+        mss = []
+        for i in range(1, s+1):
+            d_pos = np.linalg.matrix_power(Ak, i)
+            d_neg = -np.linalg.matrix_power(Ak, i)
+            mss.append(support_function(W_A, W_b, d_pos @ np.ones(nx)))
+            mss.append(support_function(W_A, W_b, d_neg @ np.ones(nx)))
+        Ms = max(mss) if mss else Ms
+
+    # Step 2: build finite Minkowski sum
+    # Start from W in V-rep
+    mat_W = cdd.Matrix(
+        np.hstack([W_b.reshape(-1,1), -W_A]).tolist(),
+        number_type="fraction"
+    )
+    mat_W.rep_type = cdd.RepType.INEQUALITY
+    P_W = cdd.Polyhedron(mat_W)
+    V_W = np.array([row[1:] for row in P_W.get_generators() if row[0] == 1], dtype=float)
+
+    V_F = V_W.copy()
+    for i in range(1, s):
+        V_i = (np.linalg.matrix_power(Ak, i) @ V_W.T).T
+        V_F = minkowski_sum(V_F, V_i)
+
+    # Step 3: scale by 1/(1-alpha)
+    V_F = (1.0/(1-alpha)) * V_F
+
+    return V_F
+
+
+def tighten_by_linear_image(AU, bU, K, V_F):
+    """
+    Return H-rep of U ⊖ (K F), where:
+      U = {u | AU u <= bU},
+      F = conv(V_F) (vertices, shape [nV, n_x]),
+      K (shape [n_u, n_x]).
+    """
+    b_new = []
+    KT = K.T  # shape (n_x, n_u)
+    for i in range(AU.shape[0]):
+        a = AU[i, :]                    # (n_u,)
+        a_in_x_space = KT @ a           # (n_x,)
+        hKF = np.max(V_F @ a_in_x_space)  # support of F in direction K^T a
+        b_new.append(bU[i] - hKF)
+
+    return AU, np.asarray(b_new)
+
+def box_to_Ab(lower, upper):
+    """
+    Convert simple box constraints (lower <= x <= upper)
+    into H-representation A, b such that A x <= b.
+    """
+    lower = np.array(lower).flatten()
+    upper = np.array(upper).flatten()
+    n = len(lower)
+
+    # For each dimension i:
+    #  x_i <= upper_i      ->  A row = e_i,   b = upper_i
+    # -x_i <= -lower_i     ->  A row = -e_i,  b = -lower_i
+    A = []
+    b = []
+    for i in range(n):
+        e_i = np.zeros(n)
+        e_i[i] = 1.0
+        A.append(e_i); b.append(upper[i])
+        A.append(-e_i); b.append(-lower[i])
+
+    return np.vstack(A), np.array(b)
 
 if __name__ == "__main__":
     main()
