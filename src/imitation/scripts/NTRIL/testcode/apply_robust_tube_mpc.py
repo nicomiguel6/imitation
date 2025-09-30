@@ -49,12 +49,26 @@ def main():
     W_polyhedron = Polyhedron(V = W_vertex)
 
     # Convert to H-rep (Ax <= b)
-    H = W_poly.get_inequalities()
+    H = W.get_inequalities()
     H_mat = np.array([list(row) for row in H], dtype=float)
     W_b, W_A = H_mat[:,0], -H_mat[:,1:]
 
+    A_x, b_x = box_to_Ab(np.array([[-10.0], [-2.0]]), np.array([[2.0], [2.0]]))
+    A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
+    
     # Compute mrpi set
     V_F = compute_mrpi(Ak, W_A, W_b)
+
+    # Tighten
+    A_x_t, b_x_t = minkowski_difference(A_x, b_x, V_F)
+    A_u_t, b_u_t = tighten_by_linear_image(A_u, b_u, K, V_F)
+
+    # Recover tightened box bounds (since A is [e_i; -e_i] stacked)
+    x_upper_t = b_x_t[0::2]          # rows with  +e_i
+    x_lower_t = -b_x_t[1::2]         # rows with  -e_i
+    u_upper_t = b_u_t[0::2]
+    u_lower_t = -b_u_t[1::2]
+
 
     # Set up discrete disturbed linear system
     model_type = 'discrete'
@@ -62,6 +76,13 @@ def main():
 
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
     _u = model.set_variable(var_type='_u', var_name='u', shape=(1,1))
+
+    x_lower_tvp = model.set_variable(var_type='_tvp', var_name='x_lower', shape=(2,1))
+    x_upper_tvp = model.set_variable(var_type='_tvp', var_name='x_upper', shape=(2,1))
+    u_lower_tvp = model.set_variable(var_type='_tvp', var_name='u_lower', shape=(1,1))
+    u_upper_tvp = model.set_variable(var_type='_tvp', var_name='u_upper', shape=(1,1))
+
+
 
     x_next = A@_x + B@_u # linear system without disturbance
 
@@ -76,13 +97,20 @@ def main():
                  't_step': 0.5,
                  'state_discretization': 'discrete',
                  'store_full_solution': True,
-                 'nplsol_opts': {'ipopt.linear_solver': 'MA27'}}
+                 'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}}
     
     mpc.set_param(**setup_mpc)
 
     # Objective
     x = model.x['x']
     u = model.u['u']
+    # Enforce: x_lower <= x <= x_upper,  u_lower <= u <= u_upper
+    mpc.set_nl_cons('x_lo', x - x_lower_tvp, ub=0.0)
+    mpc.set_nl_cons('x_hi', x_upper_tvp - x, ub=0.0)
+    mpc.set_nl_cons('u_lo', u - u_lower_tvp, ub=0.0)
+    mpc.set_nl_cons('u_hi', u_upper_tvp - u, ub=0.0)
+
+
     lterm = (x.T @ Q @ x) + (u.T @ R @ u)
     mterm = x.T @ P @ x
 
@@ -96,14 +124,17 @@ def main():
     mpc.bounds['lower', '_u', 'u'] = np.array([-1.0])
     mpc.bounds['upper', '_u', 'u'] = np.array([1.0])
 
-    A_x, b_x = box_to_Ab(np.array([[-10.0], [-2.0]]), np.array([[2.0], [2.0]]))
-    A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
 
 
     tvp_template = mpc.get_tvp_template()
 
     def tube_constraints(t_now):
-        tvp_template['_tvp', 'x_upper'] = 
+        for k in range(mpc.settings.n_horizon):
+            tvp_template['_tvp', k, 'x_lower'] = x_lower_t.reshape(-1,1)
+            tvp_template['_tvp', k, 'x_upper'] = x_upper_t.reshape(-1,1)
+            tvp_template['_tvp', k, 'u_lower'] = u_lower_t.reshape(-1,1)
+            tvp_template['_tvp', k, 'u_upper'] = u_upper_t.reshape(-1,1)
+        return tvp_template
 
 
 
@@ -132,7 +163,9 @@ def main():
     
     for k in range(50):
         u0 = mpc.make_step(x0)
-        y_next = simulator.make_step(u0)
+        x_nom0 = mpc.data.prediction(('_x', 'x'))[0]
+        u_applied = u0 + K @ (x0 - x_nom0)
+        y_next = simulator.make_step(u_applied)
         x0 = estimator.make_step(y_next)
 
     from matplotlib import rcParams
