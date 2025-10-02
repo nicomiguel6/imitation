@@ -57,7 +57,7 @@ def main():
     A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
     
     # Compute mrpi set
-    V_F = compute_mrpi(Ak, W_A, W_b)
+    V_F = compute_mrpi_hrep(Ak, W_A, W_b)
 
     # Tighten
     A_x_t, b_x_t = minkowski_difference(A_x, b_x, V_F)
@@ -260,7 +260,24 @@ def support_function(A, b, d):
     verts = poly.get_generators()
     V = np.array([row[1:] for row in verts if row[0] == 1], dtype=float)
 
-    return np.max(V @ d)
+    d = np.asarray(d)
+    d = np.atleast_2d(d)      # shape (m, n_dirs)
+    return np.max(d.T @ V, axis=1)
+
+def support_function_lp(A, b, d):
+    A = np.asarray(A, dtype=float)
+    b = np.asarray(b, dtype=float)
+    h_repr = np.hstack([b.reshape(-1,1)])
+
+    lp_mat = cdd.Matrix(np.hstack([b.reshape(-1,1), -A]), number_type='float')
+    lp_mat.rep_type = cdd.RepType.INEQUALITY
+    lp_mat.obj_type = cdd.LPObjType.MAX
+    lp_mat.obj_func = (0,) + tuple(d)
+    lp_poly = cdd.Polyhedron(lp_mat)
+    lp = cdd.LinProg(lp_mat)
+    lp.solve()
+    
+    return lp.obj_value
 
 def minkowski_sum(V1, V2):
     """
@@ -296,56 +313,98 @@ def minkowski_difference(Ax, bx, V_F):
 
     return Ax, np.array(b_new)
 
-def compute_mrpi(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
+# def compute_mrpi(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
+#     """
+#     Compute outer approximation of mRPI set for e^+ = A e + w, w in W.
+#     Inputs:
+#         Ak : closed-loop matrix
+#         W_A, W_b : polytope in H-rep (W = {x | W_A x <= W_b})
+#         epsilon : tolerance
+#     Returns:
+#         V_F : vertices of approximate mRPI set
+#     """
+#     nx = Ak.shape[0]
+#     s = 0
+#     alpha, Ms = 1000, 1000
+
+#     # Step 1: find s such that alpha small enough
+#     while alpha > epsilon/(epsilon + Ms) and s < max_iter:
+#         s += 1
+#         # Compute alpha
+#         dirs = np.linalg.matrix_power(Ak, s) @ W_A.T  # directions = A^s * facet normals
+#         alpha = np.max([support_function_lp(W_A, W_b, d) / bi
+#                         for d, bi in zip(dirs.T, W_b)])
+
+#         # Update Ms
+#         mss = []
+#         for i in range(1, s+1):
+#             d_pos = np.linalg.matrix_power(Ak, i)
+#             d_neg = -np.linalg.matrix_power(Ak, i)
+#             mss.append(support_function_lp(W_A, W_b, d_pos @ np.ones(nx)))
+#             mss.append(support_function_lp(W_A, W_b, d_neg @ np.ones(nx)))
+#         Ms = max(mss) if mss else Ms
+
+#     # Step 2: build finite Minkowski sum
+#     # Start from W in V-rep
+#     mat_W = cdd.Matrix(
+#         np.hstack([W_b.reshape(-1,1), -W_A]).tolist(),
+#         number_type="fraction"
+#     )
+#     mat_W.rep_type = cdd.RepType.INEQUALITY
+#     P_W = cdd.Polyhedron(mat_W)
+#     V_W = np.array([row[1:] for row in P_W.get_generators() if row[0] == 1], dtype=float)
+
+#     V_F = V_W.copy()
+#     for i in range(1, s):
+#         V_i = (np.linalg.matrix_power(Ak, i) @ V_W.T).T
+#         V_F = minkowski_sum(V_F, V_i)
+#     # for i in range(1,s):
+#     #     V_F = V_F + (np.linalg.matrix_power(Ak, i) @ V_W.T).T
+
+#     # Step 3: scale by 1/(1-alpha)
+#     V_F = (1.0/(1-alpha)) * V_F
+
+#     return V_F
+
+def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
     """
-    Compute outer approximation of mRPI set for e^+ = A e + w, w in W.
-    Inputs:
-        Ak : closed-loop matrix
-        W_A, W_b : polytope in H-rep (W = {x | W_A x <= W_b})
-        epsilon : tolerance
-    Returns:
-        V_F : vertices of approximate mRPI set
+    Compute mRPI outer-approximation directly in H-rep (like MPT3).
+    Returns (A_F, b_F).
     """
     nx = Ak.shape[0]
-    s = 0
-    alpha, Ms = 1000, 1000
+    s, alpha, Ms = 0, 1000, 1000
 
     # Step 1: find s such that alpha small enough
     while alpha > epsilon/(epsilon + Ms) and s < max_iter:
         s += 1
-        # Compute alpha
-        dirs = (Ak**s) @ W_A.T  # directions = A^s * facet normals
-        alpha = np.max([support_function(W_A, W_b, d) / bi
-                        for d, bi in zip(dirs, W_b)])
+        dirs = (np.linalg.matrix_power(Ak, s) @ W_A.T).T
+        alpha = np.max([
+            support_function_lp(W_A, W_b, d) / bi
+            for d, bi in zip(dirs, W_b)
+        ])
 
-        # Update Ms
+        # crude Ms bound
         mss = []
         for i in range(1, s+1):
-            d_pos = np.linalg.matrix_power(Ak, i)
-            d_neg = -np.linalg.matrix_power(Ak, i)
-            mss.append(support_function(W_A, W_b, d_pos @ np.ones(nx)))
-            mss.append(support_function(W_A, W_b, d_neg @ np.ones(nx)))
+            for d in [np.eye(nx)[j] for j in range(nx)]:
+                mss.append(support_function_lp(W_A, W_b, np.linalg.matrix_power(Ak,i) @ d))
+                mss.append(support_function_lp(W_A, W_b, -np.linalg.matrix_power(Ak,i) @ d))
         Ms = max(mss) if mss else Ms
 
-    # Step 2: build finite Minkowski sum
-    # Start from W in V-rep
-    mat_W = cdd.Matrix(
-        np.hstack([W_b.reshape(-1,1), -W_A]).tolist(),
-        number_type="fraction"
-    )
-    mat_W.rep_type = cdd.RepType.INEQUALITY
-    P_W = cdd.Polyhedron(mat_W)
-    V_W = np.array([row[1:] for row in P_W.get_generators() if row[0] == 1], dtype=float)
+    # Step 2: build H-rep of F
+    A_F = W_A.copy()
+    b_F = []
+    for a, b in zip(W_A, W_b):
+        # sum support values in direction (A^k)^T a
+        s_val = 0.0
+        for k in range(s):
+            d = (np.linalg.matrix_power(Ak,k).T @ a)
+            s_val += support_function_lp(W_A, W_b, d)
+        b_F.append(s_val / (1 - alpha))
+    b_F = np.array(b_F)
 
-    V_F = V_W.copy()
-    for i in range(1, s):
-        V_i = (np.linalg.matrix_power(Ak, i) @ V_W.T).T
-        V_F = minkowski_sum(V_F, V_i)
+    return A_F, b_F
 
-    # Step 3: scale by 1/(1-alpha)
-    V_F = (1.0/(1-alpha)) * V_F
-
-    return V_F
 
 
 def tighten_by_linear_image(AU, bU, K, V_F):
