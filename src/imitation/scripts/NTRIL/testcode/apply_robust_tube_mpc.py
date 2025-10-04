@@ -57,17 +57,11 @@ def main():
     A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
     
     # Compute mrpi set
-    V_F = compute_mrpi_hrep(Ak, W_A, W_b)
+    A_F, b_F = compute_mrpi_hrep(Ak, W_A, W_b)
 
     # Tighten
-    A_x_t, b_x_t = minkowski_difference(A_x, b_x, V_F)
-    A_u_t, b_u_t = tighten_by_linear_image(A_u, b_u, K, V_F)
-
-    # Recover tightened box bounds (since A is [e_i; -e_i] stacked)
-    x_upper_t = b_x_t[0::2]          # rows with  +e_i
-    x_lower_t = -b_x_t[1::2]         # rows with  -e_i
-    u_upper_t = b_u_t[0::2]
-    u_lower_t = -b_u_t[1::2]
+    A_x_t, b_x_t = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
+    A_u_t, b_u_t = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
 
 
     # Set up discrete disturbed linear system
@@ -77,14 +71,21 @@ def main():
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
     _u = model.set_variable(var_type='_u', var_name='u', shape=(1,1))
 
-    x_lower_tvp = model.set_variable(var_type='_tvp', var_name='x_lower', shape=(2,1))
-    x_upper_tvp = model.set_variable(var_type='_tvp', var_name='x_upper', shape=(2,1))
-    u_lower_tvp = model.set_variable(var_type='_tvp', var_name='u_lower', shape=(1,1))
-    u_upper_tvp = model.set_variable(var_type='_tvp', var_name='u_upper', shape=(1,1))
+    bx_tvp = []
+    for i in range(len(b_x)):
+        bx_tvp.append(model.set_variable(var_type='_tvp', var_name=f'bx_{i}', shape=(1,1)))
+
+    bu_tvp = []    
+    for j in range(len(b_u)):
+        bu_tvp.append(model.set_variable(var_type='_tvp', var_name=f'bu_{j}', shape=(1,1)))
+
+    # Disturbance
+    _w = model.set_variable(var_type='_tvp', var_name='w', shape=(len(A[0]),1))
 
 
 
-    x_next = A@_x + B@_u # linear system without disturbance
+
+    x_next = A@_x + B@_u + _w # linear system without disturbance
 
     model.set_rhs('x', x_next)
 
@@ -105,10 +106,14 @@ def main():
     x = model.x['x']
     u = model.u['u']
     # Enforce: x_lower <= x <= x_upper,  u_lower <= u <= u_upper
-    mpc.set_nl_cons('x_lo', x - x_lower_tvp, ub=0.0)
-    mpc.set_nl_cons('x_hi', x_upper_tvp - x, ub=0.0)
-    mpc.set_nl_cons('u_lo', u - u_lower_tvp, ub=0.0)
-    mpc.set_nl_cons('u_hi', u_upper_tvp - u, ub=0.0)
+    # during model/controller setup (before mpc.setup)
+    for i in range(len(b_x)):  # original number of state inequalities
+        # constraint: A_x[i] @ x - bx_i <= 0
+        mpc.set_nl_cons(f'X_{i}', ca.DM(A_x[i]).T @ model.x['x'] - bx_tvp[i], ub=0.0)
+
+    for j in range(len(b_u)):  # original number of input inequalities
+        # constraint: A_u[j] @ u - bu_j <= 0
+        mpc.set_nl_cons(f'U_{j}', ca.DM(A_u[j]).T @ model.u['u'] - bu_tvp[j], ub=0.0)
 
 
     lterm = (x.T @ Q @ x) + (u.T @ R @ u)
@@ -117,26 +122,29 @@ def main():
     mpc.set_objective(mterm=mterm, lterm=lterm)
 
 
-
-    mpc.bounds['lower', '_x', 'x'] = np.array([[-10.0], [-2.0]])
-    mpc.bounds['upper', '_x', 'x'] = np.array([[2.0], [2.0]])
-
-    mpc.bounds['lower', '_u', 'u'] = np.array([-1.0])
-    mpc.bounds['upper', '_u', 'u'] = np.array([1.0])
-
-
-
-    tvp_template = mpc.get_tvp_template()
-
     def tube_constraints(t_now):
-        for k in range(mpc.settings.n_horizon):
-            tvp_template['_tvp', k, 'x_lower'] = x_lower_t.reshape(-1,1)
-            tvp_template['_tvp', k, 'x_upper'] = x_upper_t.reshape(-1,1)
-            tvp_template['_tvp', k, 'u_lower'] = u_lower_t.reshape(-1,1)
-            tvp_template['_tvp', k, 'u_upper'] = u_upper_t.reshape(-1,1)
+        tvp_template = mpc.get_tvp_template()
+
+        # Compute tightened state bounds
+        A_x_tight, b_x_tight = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
+
+        # Compute tightened input bounds
+        A_u_tight, b_u_tight = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
+
+        # fill TVPs with tightened bounds
+        for i, b_val in enumerate(b_x_tight):
+            bscalar = float(b_val)
+            for k in range(setup_mpc['n_horizon']+1):
+                tvp_template['_tvp', k, f'bx_{i}'] = bscalar
+
+        for j, b_val in enumerate(b_u_tight):
+            bscalar = float(b_val)
+            for k in range(setup_mpc['n_horizon']+1):
+                tvp_template['_tvp', k, f'bu_{j}'] = bscalar
         return tvp_template
+    
 
-
+    mpc.set_tvp_fun(tube_constraints)
 
     mpc.setup()
 
@@ -144,6 +152,16 @@ def main():
 
     simulator = do_mpc.simulator.Simulator(model)
 
+    def disturbance_sim(t_now):
+        tvp_template = simulator.get_tvp_template()
+
+        # Sample disturbance
+        w = sample_from_disturbance(W_polyhedron=W_polyhedron)
+
+        tvp_template['w'] = w.reshape(-1,1)
+        return tvp_template
+    
+    simulator.set_tvp_fun(disturbance_sim)
     simulator.set_param(t_step=0.1)
     simulator.setup()
 
@@ -152,7 +170,7 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x,1])
-    x0 = np.random.uniform(-3*e,3*e) # Values between -3 and +3 for all states
+    x0 = np.array([-7, -2])# Values between -3 and +3 for all states
     mpc.x0 = x0
     simulator.x0 = x0
     estimator.x0 = x0
@@ -163,8 +181,8 @@ def main():
     
     for k in range(50):
         u0 = mpc.make_step(x0)
-        x_nom0 = mpc.data.prediction(('_x', 'x'))[0]
-        u_applied = u0 + K @ (x0 - x_nom0)
+        x_nom0 = mpc.data.prediction(('_x', 'x'))[:,0]
+        u_applied = u0 + K @ (x0.T.reshape(-1,) - x_nom0.reshape(-1,))
         y_next = simulator.make_step(u_applied)
         x0 = estimator.make_step(y_next)
 
@@ -273,7 +291,6 @@ def support_function_lp(A, b, d):
     lp_mat.rep_type = cdd.RepType.INEQUALITY
     lp_mat.obj_type = cdd.LPObjType.MAX
     lp_mat.obj_func = (0,) + tuple(d)
-    lp_poly = cdd.Polyhedron(lp_mat)
     lp = cdd.LinProg(lp_mat)
     lp.solve()
     
@@ -297,74 +314,19 @@ def minkowski_sum(V1, V2):
 
     return np.array([row[1:] for row in verts if row[0] == 1], dtype=float)
 
-def minkowski_difference(Ax, bx, V_F):
+def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
     """
-    Compute X ⊖ F where
-      X = {x | Ax x <= bx}
-      F = conv(V_F) given in V-rep (vertices)
-    Returns (A_diff, b_diff) for tightened polytope
+    Tighten state constraints X ⊖ F in H-rep.
+    A_x, b_x : original state constraints
+    A_F, b_F : H-rep of disturbance/error set F
     """
-    b_new = []
-    for i in range(Ax.shape[0]):
-        a = Ax[i,:]
-        # support of F in direction a
-        hF = np.max(V_F @ a)
-        b_new.append(bx[i] - hF)
+    import numpy as np
 
-    return Ax, np.array(b_new)
-
-# def compute_mrpi(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
-#     """
-#     Compute outer approximation of mRPI set for e^+ = A e + w, w in W.
-#     Inputs:
-#         Ak : closed-loop matrix
-#         W_A, W_b : polytope in H-rep (W = {x | W_A x <= W_b})
-#         epsilon : tolerance
-#     Returns:
-#         V_F : vertices of approximate mRPI set
-#     """
-#     nx = Ak.shape[0]
-#     s = 0
-#     alpha, Ms = 1000, 1000
-
-#     # Step 1: find s such that alpha small enough
-#     while alpha > epsilon/(epsilon + Ms) and s < max_iter:
-#         s += 1
-#         # Compute alpha
-#         dirs = np.linalg.matrix_power(Ak, s) @ W_A.T  # directions = A^s * facet normals
-#         alpha = np.max([support_function_lp(W_A, W_b, d) / bi
-#                         for d, bi in zip(dirs.T, W_b)])
-
-#         # Update Ms
-#         mss = []
-#         for i in range(1, s+1):
-#             d_pos = np.linalg.matrix_power(Ak, i)
-#             d_neg = -np.linalg.matrix_power(Ak, i)
-#             mss.append(support_function_lp(W_A, W_b, d_pos @ np.ones(nx)))
-#             mss.append(support_function_lp(W_A, W_b, d_neg @ np.ones(nx)))
-#         Ms = max(mss) if mss else Ms
-
-#     # Step 2: build finite Minkowski sum
-#     # Start from W in V-rep
-#     mat_W = cdd.Matrix(
-#         np.hstack([W_b.reshape(-1,1), -W_A]).tolist(),
-#         number_type="fraction"
-#     )
-#     mat_W.rep_type = cdd.RepType.INEQUALITY
-#     P_W = cdd.Polyhedron(mat_W)
-#     V_W = np.array([row[1:] for row in P_W.get_generators() if row[0] == 1], dtype=float)
-
-#     V_F = V_W.copy()
-#     for i in range(1, s):
-#         V_i = (np.linalg.matrix_power(Ak, i) @ V_W.T).T
-#         V_F = minkowski_sum(V_F, V_i)
-#     # for i in range(1,s):
-#     #     V_F = V_F + (np.linalg.matrix_power(Ak, i) @ V_W.T).T
-
-#     # Step 3: scale by 1/(1-alpha)
-#     V_F = (1.0/(1-alpha)) * V_F
-
-#     return V_F
+    b_tight = []
+    for a, b in zip(A_x, b_x):
+        h = support_function_lp(A_F, b_F, a)   # your routine
+        b_tight.append(b - h)
+    return np.array(A_x, dtype=float), np.array(b_tight, dtype=float)
 
 def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
     """
@@ -407,22 +369,22 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
 
 
 
-def tighten_by_linear_image(AU, bU, K, V_F):
+def tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F):
     """
-    Return H-rep of U ⊖ (K F), where:
-      U = {u | AU u <= bU},
-      F = conv(V_F) (vertices, shape [nV, n_x]),
-      K (shape [n_u, n_x]).
+    Tighten input constraints U ⊖ K F in H-rep.
+    A_u, b_u : original input constraints
+    K        : feedback gain matrix
+    A_F, b_F : H-rep of disturbance/error set F
     """
-    b_new = []
-    KT = K.T  # shape (n_x, n_u)
-    for i in range(AU.shape[0]):
-        a = AU[i, :]                    # (n_u,)
-        a_in_x_space = KT @ a           # (n_x,)
-        hKF = np.max(V_F @ a_in_x_space)  # support of F in direction K^T a
-        b_new.append(bU[i] - hKF)
+    import numpy as np
 
-    return AU, np.asarray(b_new)
+    b_tight = []
+    for a, b in zip(A_u, b_u):
+        d = K.T @ a.reshape(-1,1)               # map direction
+        h = support_function_lp(A_F, b_F, d.flatten())
+        b_tight.append(b - h)
+    return np.array(A_u, dtype=float), np.array(b_tight, dtype=float)
+
 
 def box_to_Ab(lower, upper):
     """
