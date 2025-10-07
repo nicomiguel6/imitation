@@ -10,6 +10,7 @@ import casadi as ca
 import do_mpc
 import cdd
 from scipy.linalg import solve_discrete_are
+from scipy.spatial import ConvexHull
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -41,7 +42,7 @@ def main():
     W_vertex = np.array([[0.15, 0.15],[0.15, -0.15],[-0.15,-0.15],[-0.15,0.15]], dtype=object)
     gen_mat = cdd.Matrix(
         np.hstack([np.ones((W_vertex.shape[0], 1), dtype=object), W_vertex]).tolist(),
-        number_type='fraction'
+        number_type='float'
     )
     gen_mat.rep_type = cdd.RepType.GENERATOR
 
@@ -94,8 +95,8 @@ def main():
     # Controller
     mpc = do_mpc.controller.MPC(model)
     setup_mpc = {'n_robust': 0,
-                 'n_horizon': 7,
-                 't_step': 0.5,
+                 'n_horizon': 10,
+                 't_step': 1.0,
                  'state_discretization': 'discrete',
                  'store_full_solution': True,
                  'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}}
@@ -179,7 +180,7 @@ def main():
     mpc.set_initial_guess()
 
     
-    for k in range(50):
+    for k in range(15):
         u0 = mpc.make_step(x0)
         x_nom0 = mpc.data.prediction(('_x', 'x'))[:,0]
         u_applied = u0 + K @ (x0.T.reshape(-1,) - x_nom0.reshape(-1,))
@@ -268,19 +269,11 @@ def sample_from_disturbance(W_polyhedron, n_samples=1):
 
 def support_function(A, b, d):
     # cdd wants [b | A] with inequalities in form b + A x >= 0
-    mat = cdd.Matrix(
-        np.hstack([b.reshape(-1,1), -A]).tolist(),
-        number_type="fraction"
-    )
-    mat.rep_type = cdd.RepType.INEQUALITY
-    poly = cdd.Polyhedron(mat)
-
-    verts = poly.get_generators()
-    V = np.array([row[1:] for row in verts if row[0] == 1], dtype=float)
+    V = get_vertices(A, b)
 
     d = np.asarray(d)
     d = np.atleast_2d(d)      # shape (m, n_dirs)
-    return np.max(d.T @ V, axis=1)
+    return np.max(V @ d, axis=0)
 
 def support_function_lp(A, b, d):
     A = np.asarray(A, dtype=float)
@@ -328,7 +321,7 @@ def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
         b_tight.append(b - h)
     return np.array(A_x, dtype=float), np.array(b_tight, dtype=float)
 
-def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
+def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     """
     Compute mRPI outer-approximation directly in H-rep (like MPT3).
     Returns (A_F, b_F).
@@ -345,13 +338,20 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-5, max_iter=50):
             for d, bi in zip(dirs, W_b)
         ])
 
-        # crude Ms bound
-        mss = []
+        mss = np.zeros((2*nx, 1))
         for i in range(1, s+1):
-            for d in [np.eye(nx)[j] for j in range(nx)]:
-                mss.append(support_function_lp(W_A, W_b, np.linalg.matrix_power(Ak,i) @ d))
-                mss.append(support_function_lp(W_A, W_b, -np.linalg.matrix_power(Ak,i) @ d))
-        Ms = max(mss) if mss else Ms
+            mss += np.array([support_function(W_A, W_b, np.linalg.matrix_power(Ak, i)).reshape(-1, 1), support_function(W_A, W_b, -np.linalg.matrix_power(Ak, i)).reshape(-1, 1)]).reshape((2*nx, 1))
+        
+        Ms = max(mss)
+        
+        
+        # # crude Ms bound
+        # mss = []
+        # for i in range(1, s+1):
+        #     for d in [np.eye(nx)[j] for j in range(nx)]:
+        #         mss.append(support_function_lp(W_A, W_b, np.linalg.matrix_power(Ak,i) @ d))
+        #         mss.append(support_function_lp(W_A, W_b, -np.linalg.matrix_power(Ak,i) @ d))
+        # Ms = max(mss) if mss else Ms
 
     # Step 2: build H-rep of F
     A_F = W_A.copy()
@@ -376,14 +376,48 @@ def tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F):
     K        : feedback gain matrix
     A_F, b_F : H-rep of disturbance/error set F
     """
-    import numpy as np
-
     b_tight = []
     for a, b in zip(A_u, b_u):
         d = K.T @ a.reshape(-1,1)               # map direction
         h = support_function_lp(A_F, b_F, d.flatten())
         b_tight.append(b - h)
     return np.array(A_u, dtype=float), np.array(b_tight, dtype=float)
+
+def tighten_by_linear_image_Vrep(A_u, b_u, K, A_F, b_F):
+    """ 
+    Tighten input constraints U ⊖ K F in V-rep.
+    A_u, b_u : original input constraints
+    K        : feedback gain matrix
+    A_F, b_F : H-rep of disturbance/error set F
+    """
+
+    # Begin by converting [A_u, b_u] and [A_F, b_F] into vertices
+    Uc = get_vertices(A_u, b_u)
+    Fc = get_vertices(A_F, b_F)
+
+    # multiply mRPI vertices by K
+    Fc = Fc @ np.diag(K)
+
+    # Since axis aligned...?
+    # Uc_robust = 
+
+def get_vertices(A, b):
+    """ Converts H-rep into a list of vertices """
+
+    # Form h-matrix and extract generators
+    mat = cdd.Matrix(np.hstack([b.reshape(-1,1), -A]), number_type='float')
+    mat.rep_type = cdd.RepType.INEQUALITY
+    poly = cdd.Polyhedron(mat)
+    generators = poly.get_generators()
+
+    # Convert to list of vertices
+    vertices = []
+    for generator in generators:
+        if generator[0] == 1:
+            vertices.append(generator[1:])
+    
+    return np.array(vertices, dtype=float)
+
 
 
 def box_to_Ab(lower, upper):
@@ -407,6 +441,8 @@ def box_to_Ab(lower, upper):
         A.append(-e_i); b.append(-lower[i])
 
     return np.vstack(A), np.array(b)
+
+
 
 if __name__ == "__main__":
     main()
