@@ -11,6 +11,7 @@ import do_mpc
 import cdd
 from scipy.linalg import solve_discrete_are
 from scipy.spatial import ConvexHull
+import pytope
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -40,6 +41,7 @@ def main():
 
     # Set up disturbance with cdd
     W_vertex = np.array([[0.15, 0.15],[0.15, -0.15],[-0.15,-0.15],[-0.15,0.15]], dtype=object)
+    W_polytope = pytope.Polytope(W_vertex)
     gen_mat = cdd.Matrix(
         np.hstack([np.ones((W_vertex.shape[0], 1), dtype=object), W_vertex]).tolist(),
         number_type='float'
@@ -58,7 +60,7 @@ def main():
     A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
     
     # Compute mrpi set
-    A_F, b_F = compute_mrpi_hrep(Ak, W_A, W_b)
+    A_F, b_F = compute_mrpi_hrep(Ak, W_polytope.A, W_polytope.b)
 
     # Tighten
     A_x_t, b_x_t = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
@@ -356,14 +358,21 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     # Step 2: build H-rep of F
     A_F = W_A.copy()
     b_F = []
-    for a, b in zip(W_A, W_b):
-        # sum support values in direction (A^k)^T a
-        s_val = 0.0
-        for k in range(s):
-            d = (np.linalg.matrix_power(Ak,k).T @ a)
-            s_val += support_function_lp(W_A, W_b, d)
-        b_F.append(s_val / (1 - alpha))
-    b_F = np.array(b_F)
+    Fs = pytope.Polytope(A = W_A, b = W_b)
+    for i in range (1,s):
+        Fs = Fs + np.linalg.matrix_power(Ak, i) * Fs
+    Fs = (1/1-alpha)*Fs
+    # for a, b in zip(W_A, W_b):
+    #     # sum support values in direction (A^k)^T a
+    #     s_val = 0.0
+    #     for k in range(s):
+    #         d = (np.linalg.matrix_power(Ak,k).T @ a)
+    #         s_val += support_function_lp(W_A, W_b, d)
+    #     b_F.append(s_val / (1 - alpha))
+    # b_F = np.array(b_F)
+
+    A_F = Fs.A
+    b_F = Fs.b
 
     return A_F, b_F
 
