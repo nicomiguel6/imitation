@@ -66,6 +66,12 @@ def main():
     A_x_t, b_x_t = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
     A_u_t, b_u_t = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
 
+    # compute robust MPI set
+    Xc_robust = pytope.Polytope(A = A_x_t, b = b_x_t)
+    Uc_robust = pytope.Polytope(A = A_u_t, b = b_u_t)
+
+    Xmpi_robust = compute_MPI_set(Ak, K, Xc_robust, Uc_robust)
+
 
     # Set up discrete disturbed linear system
     model_type = 'discrete'
@@ -73,6 +79,9 @@ def main():
 
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
     _u = model.set_variable(var_type='_u', var_name='u', shape=(1,1))
+
+    # Experiment with fixed bounds using precomputed Xc, Uc robust sets
+
 
     bx_tvp = []
     for i in range(len(b_x)):
@@ -128,19 +137,19 @@ def main():
     def tube_constraints(t_now):
         tvp_template = mpc.get_tvp_template()
 
-        # Compute tightened state bounds
-        A_x_tight, b_x_tight = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
+        # # Compute tightened state bounds
+        # A_x_tight, b_x_tight = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
 
-        # Compute tightened input bounds
-        A_u_tight, b_u_tight = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
+        # # Compute tightened input bounds
+        # A_u_tight, b_u_tight = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
 
         # fill TVPs with tightened bounds
-        for i, b_val in enumerate(b_x_tight):
+        for i, b_val in enumerate(b_x_t):
             bscalar = float(b_val)
             for k in range(setup_mpc['n_horizon']+1):
                 tvp_template['_tvp', k, f'bx_{i}'] = bscalar
 
-        for j, b_val in enumerate(b_u_tight):
+        for j, b_val in enumerate(b_u_t):
             bscalar = float(b_val)
             for k in range(setup_mpc['n_horizon']+1):
                 tvp_template['_tvp', k, f'bu_{j}'] = bscalar
@@ -375,6 +384,56 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     b_F = Fs.b
 
     return A_F, b_F
+
+def compute_MPI_set(Ak, K, X, U):
+    F, G, nc = convert_Poly2Mat(X, U)
+    def Fpi(i):
+        return (F + G @ K) @ np.linalg.matrix_power(Ak, i)
+    def Xpi(i): 
+        return pytope.Polytope(A = Fpi(i), b = np.ones((Fpi(i).shape[0], 1)))
+    Xmpi = Xpi(0)
+    i = 0
+    while 1:
+        i += 1
+        Xpi_i = Xpi(i)
+        Xmpi_tmp = pytope.polytope.intersection(Xmpi, Xpi_i)
+        if Xmpi_tmp.__eq__(Xmpi):
+            break
+        else:
+            Xmpi = Xmpi_tmp
+
+
+    return Xmpi
+
+def convert_Poly2Mat(X, U):
+    """convert Polyhedron to matrix of inequalities
+
+    Args:
+        X (_type_): _description_
+        U (_type_): _description_
+    """
+
+    # extract inequality matrix for X
+    def poly2ineq_norm(poly):
+        return poly.A/np.tile(poly.b, (1, np.shape(poly.A)[1]))
+    
+    F_tmp = poly2ineq_norm(X)
+    G_tmp = poly2ineq_norm(U)
+    
+    X_dim = np.linalg.matrix_rank(X.V - X.V[0])
+    U_dim = np.linalg.matrix_rank(U.V - U.V[0])
+    # check for empty matrices
+    if np.prod(np.shape(F_tmp)) == 0:
+        F_tmp = np.empty((0,X_dim))
+    if np.prod(np.shape(G_tmp)) == 0:
+        G_tmp = np.empty((0,U_dim))
+
+    F = np.vstack([F_tmp, np.zeros((G_tmp.shape[0], X_dim))])
+    G = np.vstack([np.zeros((F_tmp.shape[0], U_dim)), G_tmp])
+    nc = np.shape(F)[0]
+
+
+    return F, G, nc
 
 
 
