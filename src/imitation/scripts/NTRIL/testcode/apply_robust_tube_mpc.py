@@ -31,7 +31,7 @@ def main():
     A = np.array([[1,1],[0,1]])
     B = np.array([[0.5], [1]])
     Q = np.diag([1,1])
-    R = 1.
+    R = 0.1
 
     P = solve_discrete_are(A, B, Q, R)
     K = -np.linalg.inv(B.T @ P @ B + R) @ (B.T @ P @ A)  # LQR gain
@@ -70,7 +70,7 @@ def main():
     Xc_robust = pytope.Polytope(A = A_x_t, b = b_x_t)
     Uc_robust = pytope.Polytope(A = A_u_t, b = b_u_t)
 
-    Xmpi_robust = compute_MPI_set(Ak, K, Xc_robust, Uc_robust)
+    # Xmpi_robust = compute_MPI_set(Ak, K, Xc_robust, Uc_robust)
 
 
     # Set up discrete disturbed linear system
@@ -140,10 +140,6 @@ def main():
 
     mpc.setup()
 
-    print("Model variables:", model.x.keys())
-    print("Number of constraints:", len(mpc._nl_cons))
-    print("Number of parameters:", model.tvp.keys())
-
 
     estimator = do_mpc.estimator.StateFeedback(model)
 
@@ -157,7 +153,7 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x,1])
-    x0 = np.array([-7, -2])# Values between -3 and +3 for all states
+    x0 = np.array([-1, 2])# Values between -3 and +3 for all states
     mpc.x0 = x0
     simulator.x0 = x0
     estimator.x0 = x0
