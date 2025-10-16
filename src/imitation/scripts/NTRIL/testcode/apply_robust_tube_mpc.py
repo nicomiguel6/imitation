@@ -31,7 +31,7 @@ def main():
     A = np.array([[1,1],[0,1]])
     B = np.array([[0.5], [1]])
     Q = np.diag([1,1])
-    R = 0.1
+    R = 1.
 
     P = solve_discrete_are(A, B, Q, R)
     K = -np.linalg.inv(B.T @ P @ B + R) @ (B.T @ P @ A)  # LQR gain
@@ -80,37 +80,38 @@ def main():
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
     _u = model.set_variable(var_type='_u', var_name='u', shape=(1,1))
 
-    # Experiment with fixed bounds using precomputed Xc, Uc robust sets
-
-
-    bx_tvp = []
-    for i in range(len(b_x)):
-        bx_tvp.append(model.set_variable(var_type='_tvp', var_name=f'bx_{i}', shape=(1,1)))
-
-    bu_tvp = []    
-    for j in range(len(b_u)):
-        bu_tvp.append(model.set_variable(var_type='_tvp', var_name=f'bu_{j}', shape=(1,1)))
-
-    # Disturbance
-    _w = model.set_variable(var_type='_tvp', var_name='w', shape=(len(A[0]),1))
+    # Experiment with fixed bounds using precomputed Xc, Uc sets
 
 
 
 
-    x_next = A@_x + B@_u + _w # linear system without disturbance
+
+    x_next = A@_x + B@_u # linear system without disturbance
 
     model.set_rhs('x', x_next)
+
 
     model.setup()
 
     # Controller
     mpc = do_mpc.controller.MPC(model)
     setup_mpc = {'n_robust': 0,
-                 'n_horizon': 10,
+                 'n_horizon': 15,
                  't_step': 1.0,
                  'state_discretization': 'discrete',
                  'store_full_solution': True,
                  'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}}
+    # lower bounds of the states
+    mpc.bounds['lower','_x','x'] = np.array([-b_x_t[0], -b_x_t[2]])
+
+    # upper bounds of the states
+    mpc.bounds['upper','_x','x'] = np.array([b_x_t[1], b_x_t[3]])
+
+    # lower bounds of the input
+    mpc.bounds['lower','_u','u'] = -np.array([b_u_t[0]])
+
+    # upper bounds of the input
+    mpc.bounds['upper','_u','u'] =  np.array([b_u_t[1]])
     
     mpc.set_param(**setup_mpc)
 
@@ -118,62 +119,36 @@ def main():
     x = model.x['x']
     u = model.u['u']
     # Enforce: x_lower <= x <= x_upper,  u_lower <= u <= u_upper
-    # during model/controller setup (before mpc.setup)
-    for i in range(len(b_x)):  # original number of state inequalities
-        # constraint: A_x[i] @ x - bx_i <= 0
-        mpc.set_nl_cons(f'X_{i}', ca.DM(A_x[i]).T @ model.x['x'] - bx_tvp[i], ub=0.0)
 
-    for j in range(len(b_u)):  # original number of input inequalities
-        # constraint: A_u[j] @ u - bu_j <= 0
-        mpc.set_nl_cons(f'U_{j}', ca.DM(A_u[j]).T @ model.u['u'] - bu_tvp[j], ub=0.0)
+    # # State constraints: A_x_t x <= b_x_t  (constant)
+    # for i in range(len(b_x_t)):
+    #     a_i = ca.DM(A_x_t[i]).T     # (1 x n_x)
+    #     mpc.set_nl_cons(f'X_{i}', a_i @ model.x['x'], ub=float(b_x_t[i]))
+
+    # # Input constraints: A_u_t u <= b_u_t  (constant)
+    # for j in range(len(b_u_t)):
+    #     a_j = ca.DM(A_u_t[j]).T     # (1 x n_u)
+    #     mpc.set_nl_cons(f'U_{j}', a_j @ model.u['u'], ub=float(b_u_t[j]))
+
 
 
     lterm = (x.T @ Q @ x) + (u.T @ R @ u)
     mterm = x.T @ P @ x
 
     mpc.set_objective(mterm=mterm, lterm=lterm)
-
-
-    def tube_constraints(t_now):
-        tvp_template = mpc.get_tvp_template()
-
-        # # Compute tightened state bounds
-        # A_x_tight, b_x_tight = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
-
-        # # Compute tightened input bounds
-        # A_u_tight, b_u_tight = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
-
-        # fill TVPs with tightened bounds
-        for i, b_val in enumerate(b_x_t):
-            bscalar = float(b_val)
-            for k in range(setup_mpc['n_horizon']+1):
-                tvp_template['_tvp', k, f'bx_{i}'] = bscalar
-
-        for j, b_val in enumerate(b_u_t):
-            bscalar = float(b_val)
-            for k in range(setup_mpc['n_horizon']+1):
-                tvp_template['_tvp', k, f'bu_{j}'] = bscalar
-        return tvp_template
     
 
-    mpc.set_tvp_fun(tube_constraints)
-
     mpc.setup()
+
+    print("Model variables:", model.x.keys())
+    print("Number of constraints:", len(mpc._nl_cons))
+    print("Number of parameters:", model.tvp.keys())
+
 
     estimator = do_mpc.estimator.StateFeedback(model)
 
     simulator = do_mpc.simulator.Simulator(model)
 
-    def disturbance_sim(t_now):
-        tvp_template = simulator.get_tvp_template()
-
-        # Sample disturbance
-        w = sample_from_disturbance(W_polyhedron=W_polyhedron)
-
-        tvp_template['w'] = w.reshape(-1,1)
-        return tvp_template
-    
-    simulator.set_tvp_fun(disturbance_sim)
     simulator.set_param(t_step=0.1)
     simulator.setup()
 
@@ -198,6 +173,13 @@ def main():
         y_next = simulator.make_step(u_applied)
         x0 = estimator.make_step(y_next)
 
+    X_pred = mpc.data.prediction(('_x', 'x'))  # shape (n_x, horizon+1)
+    U_pred = mpc.data.prediction(('_u', 'u'))
+
+    # print("Min state constraint margin:", np.min(b_x_t - (A_x_t @ X_pred)))
+    # print("Min input constraint margin:", np.min(b_u_t - (A_u_t @ U_pred)))
+
+
     from matplotlib import rcParams
     rcParams['axes.grid'] = True
     rcParams['font.size'] = 18
@@ -207,6 +189,8 @@ def main():
     graphics.plot_results()
     graphics.reset_axes()
     plt.show()
+
+
 
 
 
