@@ -96,22 +96,23 @@ def main():
     # Controller
     mpc = do_mpc.controller.MPC(model)
     setup_mpc = {'n_robust': 0,
-                 'n_horizon': 15,
-                 't_step': 1.0,
+                 'n_horizon': 10,
+                 't_step': 0.1,
                  'state_discretization': 'discrete',
                  'store_full_solution': True,
-                 'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}}
-    # lower bounds of the states
-    mpc.bounds['lower','_x','x'] = np.array([-b_x_t[0], -b_x_t[2]])
+                 #'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}
+    }
+    # # lower bounds of the states
+    # mpc.bounds['lower','_x','x'] = np.array([-b_x_t[0], -b_x_t[2]])
 
-    # upper bounds of the states
-    mpc.bounds['upper','_x','x'] = np.array([b_x_t[1], b_x_t[3]])
+    # # upper bounds of the states
+    # mpc.bounds['upper','_x','x'] = np.array([b_x_t[1], b_x_t[3]])
 
-    # lower bounds of the input
-    mpc.bounds['lower','_u','u'] = -np.array([b_u_t[0]])
+    # # lower bounds of the input
+    # mpc.bounds['lower','_u','u'] = -np.array([b_u_t[0]])
 
-    # upper bounds of the input
-    mpc.bounds['upper','_u','u'] =  np.array([b_u_t[1]])
+    # # upper bounds of the input
+    # mpc.bounds['upper','_u','u'] =  np.array([b_u_t[1]])
     
     mpc.set_param(**setup_mpc)
 
@@ -132,10 +133,11 @@ def main():
 
 
 
-    lterm = (x.T @ Q @ x) + (u.T @ R @ u)
+    lterm = (x.T @ Q @ x)
     mterm = x.T @ P @ x
 
     mpc.set_objective(mterm=mterm, lterm=lterm)
+    mpc.set_rterm(ca.SX(R))
     
 
     mpc.setup()
@@ -153,7 +155,7 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x,1])
-    x0 = np.array([-1, 2])# Values between -3 and +3 for all states
+    x0 = np.array([-7, -2])# Values between -3 and +3 for all states
     mpc.x0 = x0
     simulator.x0 = x0
     estimator.x0 = x0
@@ -162,9 +164,10 @@ def main():
     mpc.set_initial_guess()
 
     
-    for k in range(15):
+    for k in range(50):
         u0 = mpc.make_step(x0)
         x_nom0 = mpc.data.prediction(('_x', 'x'))[:,0]
+        print("Predicted trajectory: ", mpc.data.prediction(('_x', 'x')))
         u_applied = u0 + K @ (x0.T.reshape(-1,) - x_nom0.reshape(-1,))
         y_next = simulator.make_step(u_applied)
         x0 = estimator.make_step(y_next)
