@@ -1,6 +1,6 @@
 import numpy as np
 import sys
-from casadi import *
+import casadi as ca
 import do_mpc
 import cdd
 from scipy.linalg import solve_discrete_are
@@ -90,6 +90,8 @@ def main():
     lterm = model.aux['cost'] # terminal cost
     # stage cost
 
+    mpc.settings.set_linear_solver()
+
     mpc.set_objective(mterm=mterm, lterm=lterm)
 
     mpc.set_rterm(u=R) # input penalty
@@ -114,6 +116,7 @@ def main():
     print("-----------------------------------------------------------------")
 
     mpc.setup()
+
 
     estimator = do_mpc.estimator.StateFeedback(model)
 

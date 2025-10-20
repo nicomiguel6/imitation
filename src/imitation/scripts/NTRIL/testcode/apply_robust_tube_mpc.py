@@ -99,22 +99,24 @@ def main():
                  'n_horizon': 10,
                  't_step': 0.1,
                  'state_discretization': 'discrete',
-                 'store_full_solution': True,
-                 #'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}
+                 'store_full_solution': True
     }
-    # # lower bounds of the states
-    # mpc.bounds['lower','_x','x'] = np.array([-b_x_t[0], -b_x_t[2]])
 
-    # # upper bounds of the states
-    # mpc.bounds['upper','_x','x'] = np.array([b_x_t[1], b_x_t[3]])
 
-    # # lower bounds of the input
-    # mpc.bounds['lower','_u','u'] = -np.array([b_u_t[0]])
+    # lower bounds of the states
+    mpc.bounds['lower','_x','x'] = np.array([-b_x_t[1], -b_x_t[3]])
 
-    # # upper bounds of the input
-    # mpc.bounds['upper','_u','u'] =  np.array([b_u_t[1]])
+    # upper bounds of the states
+    mpc.bounds['upper','_x','x'] = np.array([b_x_t[0], b_x_t[2]])
+
+    # lower bounds of the input
+    mpc.bounds['lower','_u','u'] = -np.array([b_u_t[0]])
+
+    # upper bounds of the input
+    mpc.bounds['upper','_u','u'] =  np.array([b_u_t[1]])
     
     mpc.set_param(**setup_mpc)
+    
 
     # Objective
     x = model.x['x']
@@ -136,6 +138,7 @@ def main():
     lterm = (x.T @ Q @ x)
     mterm = x.T @ P @ x
 
+    mpc.settings.set_linear_solver()
     mpc.set_objective(mterm=mterm, lterm=lterm)
     mpc.set_rterm(ca.SX(R))
     
@@ -186,6 +189,19 @@ def main():
     import matplotlib.pyplot as plt
     fig, ax, graphics = do_mpc.graphics.default_plot(mpc.data, figsize=(16,9))
     graphics.plot_results()
+
+    ub = mpc.bounds['upper', '_x', 'x']  # e.g. array([ub_0, ub_1, ...])
+    lb = mpc.bounds['lower', '_x', 'x']
+
+    # normalize axes to a 1D list
+    ax_list = np.ravel(ax) if isinstance(ax, np.ndarray) else [ax]
+
+    for i, (l, u) in enumerate(zip(np.atleast_1d(lb), np.atleast_1d(ub))):
+        if i < len(ax_list):
+            ax_list[i].axhline(y=float(u), color='C1', linestyle='--', linewidth=1)
+            ax_list[i].axhline(y=float(l), color='C1', linestyle='--', linewidth=1)
+
+
     graphics.reset_axes()
     plt.show()
 

@@ -372,7 +372,7 @@ class Simulator(do_mpc.model.IteratedVariables):
 
             # Build the DAE function
             nlp = {'x': sim_z['_z'], 'p': castools.vertcat(sim_x['_x'], sim_p), 'f': castools.DM(0), 'g': alg}
-            self.discrete_dae_solver = castools.nlpsol('dae_roots', 'ipopt', nlp)
+            self.discrete_dae_solver = castools.nlpsol('dae_roots', 'ipopt', nlp, {'ipopt.linear_solver': 'ma57'})
 
             # Build the simulator function:
             self.simulator = castools.Function('simulator',[sim_x['_x'], sim_z['_z'], sim_p],[x_next])
