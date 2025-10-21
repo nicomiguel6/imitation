@@ -80,12 +80,6 @@ def main():
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
     _u = model.set_variable(var_type='_u', var_name='u', shape=(1,1))
 
-    # Experiment with fixed bounds using precomputed Xc, Uc sets
-
-
-
-
-
     x_next = A@_x + B@_u # linear system without disturbance
 
     model.set_rhs('x', x_next)
@@ -145,10 +139,29 @@ def main():
 
     mpc.setup()
 
+    # Generate the simulation model, which is a copy of the mpc model but with an added disturbance.
+    dist_model = do_mpc.model.Model(model_type)
 
-    estimator = do_mpc.estimator.StateFeedback(model)
+    _x = dist_model.set_variable(var_type='_x', var_name='x', shape=(2,1))
+    _u = dist_model.set_variable(var_type='_u', var_name='u', shape=(1,1))
 
-    simulator = do_mpc.simulator.Simulator(model)
+    # Set disturbance
+    _d = dist_model.set_variable(var_type='_p', var_name='d', shape=(2,1)) 
+
+    x_dist_next = A@_x + B@_u + _d
+
+    dist_model.set_rhs('x', x_dist_next)
+    dist_model.setup()
+
+    simulator = do_mpc.simulator.Simulator(dist_model)
+
+    d_template = simulator.get_p_template()
+    
+    def d_fun(t_now):
+        d_template['d'] = sample_from_disturbance(W_polytope)
+        return d_template
+    
+    simulator.set_p_fun(d_fun)
 
     simulator.set_param(t_step=0.1)
     simulator.setup()
@@ -161,7 +174,6 @@ def main():
     x0 = np.array([-7, -2])# Values between -3 and +3 for all states
     mpc.x0 = x0
     simulator.x0 = x0
-    estimator.x0 = x0
 
     # Use initial state to set the initial guess.
     mpc.set_initial_guess()
@@ -173,7 +185,7 @@ def main():
         print("Predicted trajectory: ", mpc.data.prediction(('_x', 'x')))
         u_applied = u0 + K @ (x0.T.reshape(-1,) - x_nom0.reshape(-1,))
         y_next = simulator.make_step(u_applied)
-        x0 = estimator.make_step(y_next)
+        x0 = y_next
 
     X_pred = mpc.data.prediction(('_x', 'x'))  # shape (n_x, horizon+1)
     U_pred = mpc.data.prediction(('_u', 'u'))
@@ -198,8 +210,19 @@ def main():
 
     for i, (l, u) in enumerate(zip(np.atleast_1d(lb), np.atleast_1d(ub))):
         if i < len(ax_list):
-            ax_list[i].axhline(y=float(u), color='C1', linestyle='--', linewidth=1)
-            ax_list[i].axhline(y=float(l), color='C1', linestyle='--', linewidth=1)
+            color = ax_list[0].get_lines()
+            color = color[i].get_color()
+            ax_list[0].axhline(y=float(u), color=color, linestyle='--', linewidth=1)
+            ax_list[0].axhline(y=float(l), color=color, linestyle='--', linewidth=1)
+    
+    uub = mpc.bounds['upper', '_u', 'u']
+    ulb = mpc.bounds['lower', '_u', 'u']
+
+    color = ax_list[0].get_lines()
+    color = color[0].get_color()
+    ax_list[1].axhline(y=float(uub), color = color, linestyle='--', linewidth=1)
+    ax_list[1].axhline(y=float(ulb), color = color, linestyle='--', linewidth=1)
+
 
 
     graphics.reset_axes()
@@ -263,7 +286,7 @@ class Polyhedron:
 
 def sample_from_disturbance(W_polyhedron, n_samples=1):
     """Sample uniformly from the disturbance polytope."""
-    vertices = W_polyhedron.vertices()
+    vertices = W_polyhedron.V
     
     # Method 1: Rejection sampling for small polytopes
     min_coords = np.min(vertices, axis=0)
