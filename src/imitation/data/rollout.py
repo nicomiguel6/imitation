@@ -386,6 +386,7 @@ def generate_trajectories(
     rng: np.random.Generator,
     *,
     deterministic_policy: bool = False,
+    label_info: Optional[Dict[str, any]] = None,
 ) -> Sequence[types.TrajectoryWithRew]:
     """Generate trajectory dictionaries from a policy and an environment.
 
@@ -403,6 +404,8 @@ def generate_trajectories(
             action. Note the trajectories might still be non-deterministic if the
             environment has non-determinism!
         rng: used for shuffling trajectories.
+        label_info: Will add noise labels to the info of each trajectory, 
+            as a key: {"noise_level": epsilon}
 
     Returns:
         Sequence of trajectories, satisfying `sample_until`. Additional trajectories
@@ -457,12 +460,15 @@ def generate_trajectories(
         # by just making it never done.
         dones &= active
 
+        if label_info is not None:
+            modified_infos = [{**infos, **label_info} for info in infos]
+
         new_trajs = trajectories_accum.add_steps_and_auto_finish(
             acts,
             wrapped_obs,
             rews,
             dones,
-            infos,
+            modified_infos,
         )
         trajectories.extend(new_trajs)
 
@@ -674,6 +680,7 @@ def rollout(
     unwrap: bool = True,
     exclude_infos: bool = True,
     verbose: bool = True,
+    label_info: Optional[Dict[str,Any]] = None,
     **kwargs: Any,
 ) -> Sequence[types.TrajectoryWithRew]:
     """Generate policy rollouts.
@@ -701,6 +708,8 @@ def rollout(
             this field to None. Excluding `infos` can save a lot of space during
             pickles.
         verbose: If True, then print out rollout stats before saving.
+        label_info: Will add noise labels to the info of each trajectory, 
+            as a key: {"noise_level": epsilon}
         **kwargs: Passed through to `generate_trajectories`.
 
     Returns:
@@ -713,6 +722,7 @@ def rollout(
         venv,
         sample_until,
         rng=rng,
+        label_info=label_info,
         **kwargs,
     )
     if unwrap:

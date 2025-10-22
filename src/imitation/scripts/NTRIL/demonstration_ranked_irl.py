@@ -29,7 +29,7 @@ class RankedTransitionsDataset(Dataset):
         """Initialize ranked transitions dataset.
         
         Args:
-            demonstrations: Expert demonstration trajectories
+            demonstrations: Noisy rollout demonstration trajectories
             ranked_transitions: Transitions with ranking information
             segment_length: Length of trajectory segments for comparison
         """

@@ -171,7 +171,7 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x,1])
-    x0 = np.array([-7, -2])# Values between -3 and +3 for all states
+    x0 = np.array([-7, -2])
     mpc.x0 = x0
     simulator.x0 = x0
 

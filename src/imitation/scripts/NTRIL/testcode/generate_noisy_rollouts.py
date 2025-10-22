@@ -48,6 +48,8 @@ def main():
         rng=rngs
     )
 
+    a = 5
+
 
 
 if __name__=="__main__":

@@ -79,7 +79,7 @@ def main():
         'n_horizon': 10,
         't_step': 0.1,
         'state_discretization': 'discrete',
-        'store_full_solution':True,
+        'store_full_solution': True,
         # Use MA27 linear solver in ipopt for faster calculations:
         # 'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}
     }
