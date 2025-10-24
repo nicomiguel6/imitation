@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch as th
+import random
 import torch.nn as nn
 import torch.nn.functional as F
 from stable_baselines3.common import vec_env
@@ -22,94 +23,113 @@ class RankedTransitionsDataset(Dataset):
     
     def __init__(
         self,
-        demonstrations: Sequence[types.Trajectory],
-        ranked_transitions: types.Transitions,
-        segment_length: int = 50,
+        demonstrations: List[Sequence[types.TrajectoryWithRew]],
+        num_snippets: int = 10,
+        min_segment_length: int = 50,
+        max_segment_length: int = 100,
     ):
         """Initialize ranked transitions dataset.
+
+        From the total set of demonstrations, a number of snippets will be generated 
         
         Args:
             demonstrations: Noisy rollout demonstration trajectories
             ranked_transitions: Transitions with ranking information
             segment_length: Length of trajectory segments for comparison
         """
-        self.demonstrations = demonstrations
-        self.ranked_transitions = ranked_transitions
-        self.segment_length = segment_length
+        #self.ranked_transitions = ranked_transitions
+        self.num_snippets = num_snippets
+        self.min_segment_length = min_segment_length
+        self.max_segment_length = max_segment_length 
+        self.demo_dict = {}
+        self.demonstrations = []
+        self.training_data = {'traj': [], 'label': []}
+
+        self._append_demonstrations(demonstrations)
+        self._build_dict()
+        self._generate_training_samples()
+        
         
         # Prepare expert segments
-        self.expert_segments = self._extract_expert_segments()
+        # self.expert_segments = self._extract_expert_segments()
         
         # Prepare ranked segments
-        self.ranked_segments = self._extract_ranked_segments()
+        # self.ranked_segments = self._extract_ranked_segments()
     
-    def _extract_expert_segments(self) -> List[types.Transitions]:
-        """Extract segments from expert demonstrations."""
-        segments = []
-        
-        for traj in self.demonstrations:
-            for start_idx in range(len(traj.obs) - self.segment_length + 1):
-                end_idx = start_idx + self.segment_length
-                
-                segment = types.Transitions(
-                    obs=traj.obs[start_idx:end_idx],
-                    acts=traj.acts[start_idx:end_idx],
-                    next_obs=traj.obs[start_idx + 1:end_idx + 1],
-                    dones=np.zeros(self.segment_length, dtype=bool),  # Assume not done mid-trajectory
-                    infos=np.array([{"expert": True, "ranking_score": 0.0}] * self.segment_length),
-                )
-                segments.append(segment)
-        
-        return segments
+    def _append_demonstrations(self, demonstrations):
+        """ Store all demonstrations """
+        for demonstration_list in demonstrations:
+            for demonstration in demonstration_list:
+                self.demonstrations.append(demonstration)
+
+    def _build_dict(self):
+        """Build demonstration dictionary to track bins of different noise.
+
+        Make sure all demonstrations have been processed to self.demonstrations before calling. 
+         """
+        for demonstration in self.demonstrations:
+            noise_epsilon = demonstration.infos[0]["noise_level"]
+            if noise_epsilon in self.demo_dict:
+                self.demo_dict[noise_epsilon].append(demonstration)
+            else:
+                self.demo_dict[noise_epsilon] = []
+                self.demo_dict[noise_epsilon].append(demonstration)
     
-    def _extract_ranked_segments(self) -> List[types.Transitions]:
-        """Extract segments from ranked transitions."""
-        segments = []
-        n_transitions = len(self.ranked_transitions.obs)
+    def _generate_training_samples(self):
+        """Generate training samples. 
+
         
-        for start_idx in range(0, n_transitions - self.segment_length + 1, self.segment_length // 2):
-            end_idx = start_idx + self.segment_length
-            if end_idx > n_transitions:
-                break
+        """
+        step = 2
+
+        # extract all noise levels
+        noise_levels = list(self.demo_dict.keys())
+
+        # Build all snippets of trajectories
+        for itx in range(self.num_snippets):
+            # Pick two noise levels at random (make sure they are different)
+            ni = 0
+            nj = 0
+            while(ni == nj):
+                ni = np.random.randint(len(noise_levels))
+                nj = np.random.randint(len(noise_levels))
             
-            segment = types.Transitions(
-                obs=self.ranked_transitions.obs[start_idx:end_idx],
-                acts=self.ranked_transitions.acts[start_idx:end_idx],
-                next_obs=self.ranked_transitions.next_obs[start_idx:end_idx],
-                dones=self.ranked_transitions.dones[start_idx:end_idx],
-                infos=self.ranked_transitions.infos[start_idx:end_idx] if self.ranked_transitions.infos is not None else None,
-            )
-            segments.append(segment)
+            # pick random trajectory from each bin
+            ti = random.choice(self.demo_dict[noise_levels[ni]])
+            tj = random.choice(self.demo_dict[noise_levels[nj]])
+
+            # Create random snippet from each trajectory
+            min_length = min(len(ti), len(tj))
+            rand_length = np.random.randint(self.min_segment_length, self.max_segment_length)
+            if ni < nj: # bin i has less noise so choose ti snippet to be later than tj
+                tj_start = np.random.randint(min_length - rand_length + 1)
+                ti_start = np.random.randint(tj_start, len(ti) - rand_length + 1)
+            else: # tj has less noise so start later
+                ti_start = np.random.randint(min_length - rand_length + 1)
+                tj_start = np.random.randint(ti_start, len(tj) - rand_length + 1)
+            
+            snip_i = ti.obs[ti_start:ti_start+rand_length:step]
+            snip_j = tj.obs[tj_start:tj_start+rand_length:step]
+
+            if noise_levels[ni] < noise_levels[nj]:
+                # bin i has less noise, so better
+                label = 1
+            else:
+                # bin j has less noise
+                label = 0
+            
+            self.training_data['traj'].append((snip_i, snip_j))
+            self.training_data['label'].append(label)
+
         
-        return segments
     
     def __len__(self) -> int:
         """Return number of possible segment pairs."""
-        return len(self.expert_segments) * len(self.ranked_segments)
+        return len(self.training_data['label'])
     
     def __getitem__(self, idx: int) -> Tuple[types.Transitions, types.Transitions, float]:
-        """Get a segment pair with preference label."""
-        expert_idx = idx % len(self.expert_segments)
-        ranked_idx = idx // len(self.expert_segments)
-        
-        if ranked_idx >= len(self.ranked_segments):
-            ranked_idx = ranked_idx % len(self.ranked_segments)
-        
-        expert_segment = self.expert_segments[expert_idx]
-        ranked_segment = self.ranked_segments[ranked_idx]
-        
-        # Expert demonstrations are always preferred (ranking score 0.0)
-        # Higher ranking scores indicate worse performance
-        ranked_score = np.mean([
-            info["ranking_score"] for info in ranked_segment.infos
-        ]) if ranked_segment.infos is not None else 0.5
-        
-        # Preference: 0 if expert preferred, 1 if ranked segment preferred
-        # Since experts should always be preferred, this is always 0
-        # unless the ranked segment has very low noise (high quality)
-        preference = 0.0 if ranked_score > 0.1 else 1.0
-        
-        return expert_segment, ranked_segment, preference
+        """Get a specific trajectory snippet pairand label at index idx"""
+        return self.training_data['traj'][idx], self.training_data['label'][idx]
 
 
 class DemonstrationRankedIRL(base.BaseImitationAlgorithm):

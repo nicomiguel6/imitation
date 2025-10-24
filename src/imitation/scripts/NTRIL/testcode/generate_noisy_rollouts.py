@@ -45,7 +45,9 @@ def main():
         noisy_bc_policy,
         venv,
         rollout.make_sample_until(min_episodes=10),
-        rng=rngs
+        rng=rngs,
+        exclude_infos=False,
+        label_info={'noise_level': epsilon},
     )
 
     a = 5

@@ -461,14 +461,14 @@ def generate_trajectories(
         dones &= active
 
         if label_info is not None:
-            modified_infos = [{**infos, **label_info} for info in infos]
+            infos = [{**info, **label_info} for info in infos]
 
         new_trajs = trajectories_accum.add_steps_and_auto_finish(
             acts,
             wrapped_obs,
             rews,
             dones,
-            modified_infos,
+            infos,
         )
         trajectories.extend(new_trajs)
 

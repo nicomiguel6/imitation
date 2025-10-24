@@ -10,35 +10,80 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from imitation.data import rollout
+from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector, NoisyPolicy
 from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.scripts.NTRIL.utils import visualize_noise_levels, analyze_ranking_quality
+from imitation.scripts.NTRIL.demonstration_ranked_irl import RankedTransitionsDataset
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.util import logger, util
 from imitation.util.logger import configure
 from imitation.data import serialize
 from imitation.data import types
+from imitation.algorithms import bc
+from imitation.algorithms.bc import BC
 
 
 def main():
     """ Build dataset of ranked demonstration data"""
 
     # Import sample trajectories
+    """Load BC policy"""
+    policy_path = "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/BC_policy"
+    bc_policy = bc.reconstruct_policy(policy_path, device="cuda")
+
+    """Noise Injector"""
+    epsilon = 0.5
+    injector = EpsilonGreedyNoiseInjector()
+
+    """Rollout trajectory"""
+    noisy_bc_policy = injector.inject_noise(bc_policy, noise_level=epsilon)
+
+    """Generate environment"""
+    rngs = np.random.default_rng()
+    
+    # Setup environment
+    venv = util.make_vec_env("MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
+    
+    # Generate expert demonstrations
+    print("Generating expert demonstrations...")
+    expert_trajectories = rollout.rollout(
+        noisy_bc_policy,
+        venv,
+        rollout.make_sample_until(min_episodes=10),
+        rng=rngs,
+        exclude_infos=False,
+        label_info={'noise_level': epsilon},
+    )
+    epsilon = 0.1
+    injector = EpsilonGreedyNoiseInjector()
+
+    noisy_bc_policy_2 = injector.inject_noise(bc_policy, noise_level=epsilon)
+
+    expert_trajectories_additional = rollout.rollout(
+        noisy_bc_policy_2,
+        venv,
+        rollout.make_sample_until(min_episodes=10),
+        rng=rngs,
+        exclude_infos=False,
+        label_info={'noise_level': epsilon},
+    )
 
     # Setup ranking dictionary
-
+    test_dataset = RankedTransitionsDataset([expert_trajectories, expert_trajectories_additional])
     
 
 
+    print(len(test_dataset.demonstrations))
 
-
-
-
+    training_data = test_dataset.training_data
 
 
     return None
 
 
-        
+
+if __name__=="__main__":
+    main()
 
 
 
