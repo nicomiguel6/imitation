@@ -5,10 +5,13 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch as th
+import gymnasium as gym
 import random
+import tqdm
 import torch.nn as nn
 import torch.nn.functional as F
 from stable_baselines3.common import vec_env
+from stable_baselines3.common import preprocessing
 from torch.utils.data import DataLoader, Dataset
 
 from imitation.algorithms import base
@@ -27,6 +30,7 @@ class RankedTransitionsDataset(Dataset):
         num_snippets: int = 10,
         min_segment_length: int = 50,
         max_segment_length: int = 100,
+        generate_samples: bool = True,
     ):
         """Initialize ranked transitions dataset.
 
@@ -34,8 +38,11 @@ class RankedTransitionsDataset(Dataset):
         
         Args:
             demonstrations: Noisy rollout demonstration trajectories
-            ranked_transitions: Transitions with ranking information
-            segment_length: Length of trajectory segments for comparison
+            num_snippets: total number of training samples to generate
+            min_segment_length: minimum length of segments extracted from a trajectory
+            max_segment_length: maximum length of segments extracted from a trajectory
+            generate_samples: boolean to determine whether to generate samples upon object instantiation.
+                If False, then samples of the form (snippet_i, snippiet_j, label) must be passed to self.training_data
         """
         #self.ranked_transitions = ranked_transitions
         self.num_snippets = num_snippets
@@ -47,7 +54,9 @@ class RankedTransitionsDataset(Dataset):
 
         self._append_demonstrations(demonstrations)
         self._build_dict()
-        self._generate_training_samples()
+
+        if generate_samples:
+            self._generate_training_samples()
         
         
         # Prepare expert segments
@@ -56,7 +65,7 @@ class RankedTransitionsDataset(Dataset):
         # Prepare ranked segments
         # self.ranked_segments = self._extract_ranked_segments()
     
-    def _append_demonstrations(self, demonstrations):
+    def _append_demonstrations(self, demonstrations: List[Sequence[types.TrajectoryWithRew]]):
         """ Store all demonstrations """
         for demonstration_list in demonstrations:
             for demonstration in demonstration_list:
@@ -122,6 +131,17 @@ class RankedTransitionsDataset(Dataset):
             self.training_data['label'].append(label)
 
         
+    
+    def load_training_samples(self, training_samples: List[Tuple[Tuple[np.ndarray, np.ndarray], int]]):
+        """Load supplied training samples into dict format
+
+        Args:
+            training_samples (List[Tuple[Tuple[np.ndarray, np.ndarray], int]]): Training samples given as:
+            (([traj_snippet_i], [traj_snippet_2]), label)
+        """
+        for training_sample in training_samples:
+            self.training_data['traj'].append(training_sample[0])
+            self.training_data['label'].append(training_sample[1])
     
     def __len__(self) -> int:
         """Return number of possible segment pairs."""
@@ -195,8 +215,7 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
     
     def train(
         self,
-        demonstrations: Sequence[types.Trajectory],
-        ranked_dataset: types.Transitions,
+        train_dataloader: DataLoader,
         n_epochs: int = 100,
         eval_interval: int = 10,
         **kwargs,
@@ -213,19 +232,8 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
         Returns:
             Training statistics
         """
-        # Create dataset and dataloader
-        self.dataset = RankedTransitionsDataset(
-            demonstrations=demonstrations,
-            ranked_transitions=ranked_dataset,
-            segment_length=self.segment_length,
-        )
-        
-        self.dataloader = DataLoader(
-            self.dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            collate_fn=self._collate_fn,
-        )
+        # Create dataloader
+        self.train_dataloader = train_dataloader
         
         # Training loop
         stats = {
@@ -242,18 +250,18 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
             if epoch % eval_interval == 0:
                 self._logger.log(f"Epoch {epoch}: Loss = {epoch_loss:.6f}")
                 
-                # Evaluate reward network
-                eval_stats = self._evaluate_reward_net(demonstrations, ranked_dataset)
-                for key, value in eval_stats.items():
-                    if key not in stats:
-                        stats[key] = []
-                    stats[key].append(value)
+                # # Evaluate reward network
+                # eval_stats = self._evaluate_reward_net(demonstrations, ranked_dataset)
+                # for key, value in eval_stats.items():
+                #     if key not in stats:
+                #         stats[key] = []
+                #     stats[key].append(value)
         
         return stats
     
     def _train_epoch(self) -> float:
         """Train for one epoch."""
-        if self.dataloader is None:
+        if self.train_dataloader is None:
             raise ValueError("Dataloader not initialized")
         
         total_loss = 0.0
@@ -261,8 +269,8 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
         
         self.reward_net.train()
         
-        for batch in self.dataloader:
-            expert_segments, ranked_segments, preferences = batch
+        for batch in self.train_dataloader:
+            segment_pairs, label = batch
             
             # Forward pass
             loss = self._compute_loss(expert_segments, ranked_segments, preferences)

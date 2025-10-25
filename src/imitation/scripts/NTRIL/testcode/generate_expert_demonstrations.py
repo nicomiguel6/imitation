@@ -3,6 +3,7 @@
 import numpy as np
 import os
 import gymnasium as gym
+import seals
 import osqp
 import hypothesis
 import hypothesis.strategies as st
@@ -18,7 +19,7 @@ from imitation.util.logger import configure
 from imitation.data import serialize
 
 def main():
-    """Generate expert demonstration on Mountain Car Continuous."""
+    """Generate expert demonstration on seals' Mountain Car Continuous."""
     print("Generating expert demonstrations on MountainCarContinuous-v0...")
 
     # Path to save/load the model
@@ -28,7 +29,7 @@ def main():
     rngs = np.random.default_rng()
     
     # Setup environment
-    venv = util.make_vec_env("MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
+    venv = util.make_vec_env("seals/MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
     
     if os.path.exists(model_path):
         print(f"Loading existing model from {model_path}...")

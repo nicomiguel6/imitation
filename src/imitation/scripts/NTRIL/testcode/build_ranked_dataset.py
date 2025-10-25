@@ -8,6 +8,7 @@ import hypothesis
 import hypothesis.strategies as st
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
+import torch
 
 from imitation.data import rollout
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector, NoisyPolicy
@@ -76,6 +77,23 @@ def main():
     print(len(test_dataset.demonstrations))
 
     training_data = test_dataset.training_data
+
+    ## Store trajectories
+    save_path_traj = "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/trajectories"
+    serialize.save(save_path_traj, test_dataset.demonstrations)
+
+    ## Store training data
+    save_path_data = "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/training_data.pth"
+    training_samples = []
+    for i in range(len(test_dataset)):
+        sample = test_dataset[i]
+        training_samples.append(sample)
+    
+    torch.save({'samples': training_samples, 
+                'num_snippets': test_dataset.num_snippets,
+                'min_segment_length': test_dataset.min_segment_length,
+                'max_segment_length': test_dataset.max_segment_length,
+                }, save_path_data)
 
 
     return None
