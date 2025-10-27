@@ -218,8 +218,8 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
     def train(
         self,
         train_dataloader: DataLoader,
-        n_epochs: int = 10,
-        eval_interval: int = 10,
+        n_epochs: int = 100,
+        eval_interval: int = 1,
         **kwargs,
     ) -> Dict[str, Any]:
         """Train the reward network using ranked demonstrations.
@@ -273,12 +273,13 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
         
         for batch in self.train_dataloader:
             segment_pairs, label = batch
+
+            self.optimizer.zero_grad()
             
             # Forward pass
-            loss = self._compute_loss(segment_pairs, ranked_segments, preferences)
+            loss = self._compute_loss(segment_pairs, label)
             
             # Backward pass
-            self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
@@ -293,42 +294,43 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
         labels: List[int],
     ) -> th.Tensor:
         """Compute the total loss for a batch."""
+
+        batch_outputs = []
+        batch_sum_abs_rewards = []
+        loss_criterion = nn.CrossEntropyLoss()
         
         # Iterate over each segment pair and label
-        for segment_pair, label in zip(segment_pairs, labels):
+        for segment_pair, _ in zip(segment_pairs, labels):
 
             # convert to torch tensor
             traj_i = th.from_numpy(segment_pair[0]).to(self.device)
             traj_j = th.from_numpy(segment_pair[1]).to(self.device)
-            label = th.from_numpy(label).to(self.device)
-
-            # zero gradient
-            self.optimizer.zero_grad()
 
             # calculate cumulative reward
-            sum_rewards, sum_abs_rewards = self.reward_net.forward(traj_i, traj_j)
+            outputs, sum_abs_rewards = self.reward_net.forward(traj_i, traj_j)
 
-
-
-
+            # append to collection
+            batch_outputs.append(outputs)
+            batch_sum_abs_rewards.append(sum_abs_rewards)
         
-        
+        # Stack into tensors
+        batch_outputs = th.stack(batch_outputs, dim = 0)
+        batch_sum_abs_rewards = th.stack(batch_sum_abs_rewards, dim=0)
+        batch_labels = th.tensor(labels, dtype=th.long, device=self.device)
+
+
         # Preference loss (Bradley-Terry model)
-        preference_logits = expert_rewards - ranked_rewards
-        preference_loss = F.binary_cross_entropy_with_logits(
-            preference_logits, preferences
+        preference_loss = loss_criterion(
+            batch_outputs, batch_labels
         )
-        
-        # Ranking loss (expert should have highest reward)
-        ranking_loss = F.relu(ranked_rewards - expert_rewards + 1.0).mean()
+
         
         # Regularization loss
-        reg_loss = sum(p.pow(2.0).sum() for p in self.reward_net.parameters())
+        reg_loss = batch_sum_abs_rewards.mean()
         
         # Total loss
         total_loss = (
             self.preference_loss_weight * preference_loss +
-            self.ranking_loss_weight * ranking_loss +
             self.regularization_weight * reg_loss
         )
         

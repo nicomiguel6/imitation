@@ -458,6 +458,29 @@ class BasicRewardNet(RewardNet):
         
 class TrajectoryRewardNet(BasicRewardNet):
 
+    def __init__(
+        self,
+        observation_space: gym.Space,
+        action_space: gym.Space,
+        use_state: bool = True,
+        use_action: bool = True,
+        use_next_state: bool = False,
+        use_done: bool = False,
+        hid_sizes: Sequence[int] = (256, 256),
+        **kwargs,
+    ): 
+        
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            use_state=use_state,
+            use_action=use_action,
+            use_next_state=use_next_state,
+            use_done=use_done,
+            hid_sizes=hid_sizes,
+            **kwargs,            
+        )
+
     def _cumulative_reward(self, traj: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
         """Compute cumulative rewards for a trajectory of states
 
@@ -472,8 +495,8 @@ class TrajectoryRewardNet(BasicRewardNet):
         sum_abs_rewards = 0
 
         # Input: trajectory of states with shape (1 x n_segment x 2)
-        x = traj.flatten(start_dim=0, end_dim=1)
-        x = self.mlp(x)
+        # x = traj.flatten(start_dim=0, end_dim=1)
+        x = BasicRewardNet.forward(self,traj)
 
         sum_rewards += th.sum(x)
         sum_abs_rewards += th.sum(th.abs(x))
