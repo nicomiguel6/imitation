@@ -162,7 +162,7 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
     
     def __init__(
         self,
-        reward_net: reward_nets.RewardNet,
+        reward_net: reward_nets.TrajectoryRewardNet,
         venv: vec_env.VecEnv,
         *,
         batch_size: int = 32,
@@ -173,6 +173,7 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
         regularization_weight: float = 1e-3,
         segment_length: int = 50,
         custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+        device: th.device = 'cpu',
         **kwargs,
     ):
         """Initialize Demonstration Ranked IRL.
@@ -201,6 +202,7 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
         self.preference_loss_weight = preference_loss_weight
         self.regularization_weight = regularization_weight
         self.segment_length = segment_length
+        self.device = device
         
         # Initialize optimizer
         self.optimizer = th.optim.Adam(
@@ -216,7 +218,7 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
     def train(
         self,
         train_dataloader: DataLoader,
-        n_epochs: int = 100,
+        n_epochs: int = 10,
         eval_interval: int = 10,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -273,7 +275,7 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
             segment_pairs, label = batch
             
             # Forward pass
-            loss = self._compute_loss(expert_segments, ranked_segments, preferences)
+            loss = self._compute_loss(segment_pairs, ranked_segments, preferences)
             
             # Backward pass
             self.optimizer.zero_grad()
@@ -283,38 +285,33 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
             total_loss += loss.item()
             n_batches += 1
         
-        return total_loss / max(n_batches, 1)
+        return total_loss / max(n_batches, 1)    
     
     def _compute_loss(
         self,
-        expert_segments: List[types.Transitions],
-        ranked_segments: List[types.Transitions],
-        preferences: th.Tensor,
+        segment_pairs: List[Tuple[np.ndarray, np.ndarray]],
+        labels: List[int],
     ) -> th.Tensor:
         """Compute the total loss for a batch."""
-        # Compute rewards for segments
-        expert_rewards = []
-        ranked_rewards = []
         
-        for expert_seg, ranked_seg in zip(expert_segments, ranked_segments):
-            # Expert segment rewards
-            expert_obs = th.tensor(expert_seg.obs, dtype=th.float32)
-            expert_acts = th.tensor(expert_seg.acts, dtype=th.float32)
-            expert_next_obs = th.tensor(expert_seg.next_obs, dtype=th.float32)
-            
-            expert_reward = self.reward_net(expert_obs, expert_acts, expert_next_obs, None).sum()
-            expert_rewards.append(expert_reward)
-            
-            # Ranked segment rewards
-            ranked_obs = th.tensor(ranked_seg.obs, dtype=th.float32)
-            ranked_acts = th.tensor(ranked_seg.acts, dtype=th.float32)
-            ranked_next_obs = th.tensor(ranked_seg.next_obs, dtype=th.float32)
-            
-            ranked_reward = self.reward_net(ranked_obs, ranked_acts, ranked_next_obs, None).sum()
-            ranked_rewards.append(ranked_reward)
+        # Iterate over each segment pair and label
+        for segment_pair, label in zip(segment_pairs, labels):
+
+            # convert to torch tensor
+            traj_i = th.from_numpy(segment_pair[0]).to(self.device)
+            traj_j = th.from_numpy(segment_pair[1]).to(self.device)
+            label = th.from_numpy(label).to(self.device)
+
+            # zero gradient
+            self.optimizer.zero_grad()
+
+            # calculate cumulative reward
+            sum_rewards, sum_abs_rewards = self.reward_net.forward(traj_i, traj_j)
+
+
+
+
         
-        expert_rewards = th.stack(expert_rewards)
-        ranked_rewards = th.stack(ranked_rewards)
         
         # Preference loss (Bradley-Terry model)
         preference_logits = expert_rewards - ranked_rewards

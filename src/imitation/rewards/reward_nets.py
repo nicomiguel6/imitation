@@ -438,7 +438,7 @@ class BasicRewardNet(RewardNet):
 
         self.mlp = networks.build_mlp(**full_build_mlp_kwargs)
 
-    def forward(self, state, action, next_state, done):
+    def forward(self, state, action=None, next_state=None, done=None):
         inputs = []
         if self.use_state:
             inputs.append(th.flatten(state, 1))
@@ -455,7 +455,36 @@ class BasicRewardNet(RewardNet):
         assert outputs.shape == state.shape[:1]
 
         return outputs
+        
+class TrajectoryRewardNet(BasicRewardNet):
 
+    def _cumulative_reward(self, traj: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+        """Compute cumulative rewards for a trajectory of states
+
+        Args:
+            traj (th.Tensor): Trajectory of states with shape (1 x n_segment x 2)
+
+        Returns:
+            sum_rewards (th.Tensor): Cumulative sum of rewards across trajectory
+            sum_abs_rewards (th.Tensor): Cumulative absolute sum of rewards across trajectory 
+        """
+        sum_rewards = 0
+        sum_abs_rewards = 0
+
+        # Input: trajectory of states with shape (1 x n_segment x 2)
+        x = traj.flatten(start_dim=0, end_dim=1)
+        x = self.mlp(x)
+
+        sum_rewards += th.sum(x)
+        sum_abs_rewards += th.sum(th.abs(x))
+
+        return sum_rewards, sum_abs_rewards
+
+    def forward(self, traj_i: th.Tensor, traj_j: th.Tensor) -> Tuple[th.Tensor, float]:
+
+        cum_r_i, abs_r_i = self._cumulative_reward(traj_i)
+        cum_r_j, abs_r_j = self._cumulative_reward(traj_j)
+        return th.cat((cum_r_i.unsqueeze(0), cum_r_j.unsqueeze(0)),0), abs_r_i + abs_r_j
 
 class CnnRewardNet(RewardNet):
     """CNN that takes as input the state, action, next state and done flag.

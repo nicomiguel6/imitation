@@ -24,7 +24,7 @@ from imitation.data import serialize
 from imitation.data import types
 from imitation.algorithms import bc
 from imitation.algorithms.bc import BC
-from imitation.rewards.reward_nets import BasicRewardNet
+from imitation.rewards.reward_nets import TrajectoryRewardNet
 
 def main():
 
@@ -45,9 +45,13 @@ def main():
 
     training_dataset.load_training_samples(loaded_data['samples'])
 
-    # Set up DataLoader
-    batch_size = 1
-    train_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True)
+    # Set up DataLoader and custom collate function
+    def my_collate(batch):
+        segment_data = [batch_data[0] for batch_data in batch]
+        labels = [batch_data[1] for batch_data in batch]
+        return segment_data, labels
+    batch_size = 2
+    train_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, collate_fn=my_collate)
 
     # Setup environment
     rngs = np.random.default_rng()
@@ -56,7 +60,7 @@ def main():
     # Set up reward network
     obs_space = venv.observation_space
     act_space = venv.action_space
-    reward_net = BasicRewardNet(observation_space=obs_space,
+    reward_net = TrajectoryRewardNet(observation_space=obs_space,
                                 action_space=act_space,
                                 use_state=True,
                                 use_action=False,
@@ -64,11 +68,15 @@ def main():
                                 use_done=False,
                                 hid_sizes=(256,256),
                            )
+    
+    
 
     reward_learner = DemonstrationRankedIRL(reward_net=reward_net,
                                             venv=venv,
                                             batch_size=batch_size,
                                             )
+    
+
     
     reward_learner.train(train_dataloader=train_dataloader)
 
