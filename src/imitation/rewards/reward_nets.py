@@ -463,7 +463,7 @@ class TrajectoryRewardNet(BasicRewardNet):
         observation_space: gym.Space,
         action_space: gym.Space,
         use_state: bool = True,
-        use_action: bool = True,
+        use_action: bool = False,
         use_next_state: bool = False,
         use_done: bool = False,
         hid_sizes: Sequence[int] = (256, 256),

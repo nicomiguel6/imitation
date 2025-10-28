@@ -414,6 +414,8 @@ def generate_trajectories(
     """
     get_actions = policy_to_callable(policy, venv, deterministic_policy)
 
+
+
     # Collect rollout tuples.
     trajectories = []
     # accumulator for incomplete trajectories
@@ -424,6 +426,8 @@ def generate_trajectories(
         (np.ndarray, dict),
     ), "Tuple observations are not supported."
     wrapped_obs = types.maybe_wrap_in_dictobs(obs)
+
+    
 
     # we use dictobs to iterate over the envs in a vecenv
     for env_idx, ob in enumerate(wrapped_obs):

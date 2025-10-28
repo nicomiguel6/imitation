@@ -1,7 +1,7 @@
 """Noise injection module for NTRIL pipeline."""
 
 import abc
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -130,7 +130,10 @@ class ParameterNoiseInjector(BaseNoiseInjector):
         return noisy_policy
     
 class EpsilonGreedyNoiseInjector(BaseNoiseInjector):
-    """Injects epsilon-greedy noise into policy actions."""
+    """Injects epsilon-greedy noise into policy actions.
+    
+    Tracks number of times noise was injected into policy.
+    """
 
     def inject_noise(
         self,
@@ -149,9 +152,13 @@ class EpsilonGreedyNoiseInjector(BaseNoiseInjector):
         base_action: th.Tensor,
         action_space: gym.Space,
         noise_level: float,
-    ) -> th.Tensor:
+    ) -> Tuple[th.Tensor, bool]:
         """With probability epsilon, return a random action; else, return base_action."""
+
+        noise_applied = False
         if np.random.rand() < noise_level:
+            # Track noise application
+            noise_applied = True
             if isinstance(action_space, gym.spaces.Box):
                 random_action = th.from_numpy(
                     np.random.uniform(
@@ -200,6 +207,18 @@ class NoisyPolicy(policies.BasePolicy):
         self.base_policy = base_policy
         self.noise_injector = noise_injector
         self.noise_level = noise_level
+        self.last_noise_applied = False
+
+        # Track noise count
+        self.noise_counts = {} # {env_idx: count}
+    
+    def reset_noise_count(self, env_idx: int = 0):
+        """Reset noise count for a specific environment (called on episode start)."""
+        self.noise_counts[env_idx] = 0
+    
+    def get_noise_count(self, env_idx: int = 0) -> int:
+        """Get noise count for a specific environment."""
+        return self.noise_counts.get(env_idx, 0)
     
     def _predict(
         self, 
@@ -214,9 +233,10 @@ class NoisyPolicy(policies.BasePolicy):
 
         # Use the noise injector's apply_noise method if it exists
         if hasattr(self.noise_injector, "apply_noise"):
-            return self.noise_injector.apply_noise(
+            action = self.noise_injector.apply_noise(
                 base_action, self.action_space, self.noise_level
             )
+            return action
         else:
             # fallback: return base_action (or implement other noise logic)
             return base_action

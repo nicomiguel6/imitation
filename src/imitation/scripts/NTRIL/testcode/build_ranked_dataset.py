@@ -2,6 +2,7 @@
 
 import numpy as np
 import os
+import seals
 import gymnasium as gym
 import osqp
 import hypothesis
@@ -43,7 +44,7 @@ def main():
     rngs = np.random.default_rng()
     
     # Setup environment
-    venv = util.make_vec_env("MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
+    venv = util.make_vec_env("seals/MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
     
     # Generate expert demonstrations
     print("Generating expert demonstrations...")

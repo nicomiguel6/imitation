@@ -28,7 +28,7 @@ def main():
     bc_policy = bc.reconstruct_policy(policy_path, device="cuda")
 
     """Noise Injector"""
-    epsilon = 0.5
+    epsilon = 0.1
     injector = EpsilonGreedyNoiseInjector()
 
     """Rollout trajectory"""
@@ -38,7 +38,7 @@ def main():
     rngs = np.random.default_rng()
     
     # Setup environment
-    venv = util.make_vec_env("seals/MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
+    venv = util.make_vec_env("MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
     
     # Generate expert demonstrations
     print("Generating expert demonstrations...")

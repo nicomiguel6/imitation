@@ -29,7 +29,7 @@ def main():
     rngs = np.random.default_rng()
     
     # Setup environment
-    venv = util.make_vec_env("seals/MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
+    venv = util.make_vec_env("seals/MountainCar-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
     
     if os.path.exists(model_path):
         print(f"Loading existing model from {model_path}...")
