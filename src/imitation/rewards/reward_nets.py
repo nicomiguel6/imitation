@@ -503,7 +503,7 @@ class TrajectoryRewardNet(BasicRewardNet):
 
         return sum_rewards, sum_abs_rewards
 
-    def forward(self, traj_i: th.Tensor, traj_j: th.Tensor) -> Tuple[th.Tensor, float]:
+    def compare(self, traj_i: th.Tensor, traj_j: th.Tensor) -> Tuple[th.Tensor, float]:
 
         cum_r_i, abs_r_i = self._cumulative_reward(traj_i)
         cum_r_j, abs_r_j = self._cumulative_reward(traj_j)

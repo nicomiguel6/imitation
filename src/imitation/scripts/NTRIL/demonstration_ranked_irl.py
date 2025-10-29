@@ -307,7 +307,7 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
             traj_j = th.from_numpy(segment_pair[1]).to(self.device)
 
             # calculate cumulative reward
-            outputs, sum_abs_rewards = self.reward_net.forward(traj_i, traj_j)
+            outputs, sum_abs_rewards = self.reward_net.compare(traj_i, traj_j)
 
             # append to collection
             batch_outputs.append(outputs)
