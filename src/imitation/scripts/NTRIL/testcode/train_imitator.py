@@ -68,7 +68,7 @@ def main():
                                 use_next_state=False,
                                 use_done=False,
                                 hid_sizes=(256,256),
-                           )
+                           )                              
     
     
 
