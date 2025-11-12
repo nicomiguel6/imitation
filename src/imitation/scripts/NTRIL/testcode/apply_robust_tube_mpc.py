@@ -3,7 +3,7 @@
 import numpy as np
 import os
 import gymnasium as gym
-import osqp
+
 import hypothesis
 import hypothesis.strategies as st
 import casadi as ca

@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch as th
 from scipy.optimize import minimize
+from scipy.linalg import solve_discrete_are
+import casadi as ca
+import do_mpc
+import cdd
+import pytope
 
 from imitation.data import types
 from imitation.util import util
@@ -21,10 +26,15 @@ class RobustTubeMPC:
     def __init__(
         self,
         horizon: int = 10,
+        time_step: float = 0.1,
         disturbance_bound: float = 0.1,
         tube_radius: float = 0.05,
+        A: Optional[np.ndarray] = None,
+        B: Optional[np.ndarray] = None,
         Q: Optional[np.ndarray] = None,
         R: Optional[np.ndarray] = None,
+        disturbance_vertices: Optional[np.ndarray] = None,
+        state_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         control_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         linearization_method: str = "finite_difference",
         finite_diff_eps: float = 1e-6,
@@ -33,8 +43,11 @@ class RobustTubeMPC:
         
         Args:
             horizon: MPC prediction horizon
+            time_step: discretization time step
             disturbance_bound: Bound for disturbance set
             tube_radius: Radius of the robust tube
+            A: State Dynamics matrix
+            B: Control Dynamics matrix
             Q: State cost matrix (if None, will be identity)
             R: Control cost matrix (if None, will be identity)
             control_bounds: Tuple of (lower_bound, upper_bound) for controls
@@ -42,89 +55,124 @@ class RobustTubeMPC:
             finite_diff_eps: Epsilon for finite difference linearization
         """
         self.horizon = horizon
+        self.time_step = time_step
         self.disturbance_bound = disturbance_bound
         self.tube_radius = tube_radius
+        self.A = A
+        self.B = B
         self.Q = Q
         self.R = R
+        self.disturbance_vertices = disturbance_vertices
+        self.state_bounds = state_bounds
         self.control_bounds = control_bounds
         self.linearization_method = linearization_method
         self.finite_diff_eps = finite_diff_eps
         
-        # Storage for learned dynamics
-        self.A_matrices: List[np.ndarray] = []
-        self.B_matrices: List[np.ndarray] = []
-        self.state_dim: Optional[int] = None
-        self.action_dim: Optional[int] = None
+        self.state_dim = np.shape(A)[1]
+        self.action_dim = np.shape(B)[1]
     
-    def fit_dynamics(
-        self, 
-        trajectories: List[types.Trajectory],
-        method: str = "least_squares",
-    ) -> Dict[str, Any]:
-        """Fit linear dynamics model from trajectory data.
+    def setup(self):
+
+        # ------------ PRELIMINARY SETS ------------- #
+        # Solve for P, K matrices
+        self.P = solve_discrete_are(self.A, self.B, self.Q, self.R)
+        self.K = -np.linalg.inv(self.B.T @ self.P @ self.B + self.R) @ (self.B @ self.P @ self.A)
+
+        # Closed loop
+        self.Ak = self.A + self.B@self.K
+
+        # Set up disturbance polytope
+        self.disturbance_polytope = pytope.Polytope(self.disturbance_vertices)
+
+        # Compute mrpi set
+        self.A_F, self.b_F = compute_mrpi_hrep(self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b)
+
+        # Tighten state and constraint bounds accordingly
+        if self.state_bounds is not None:
+            A_x_t, b_x_t = tighten_state_constraints(self.state_bounds, self.A_F, self.b_F)
         
-        Args:
-            trajectories: List of trajectories to fit dynamics from
-            method: Method for fitting dynamics ("least_squares", "ridge")
-            
-        Returns:
-            Dictionary with fitting statistics
-        """
-        # Collect state-action-next_state tuples
-        states = []
-        actions = []
-        next_states = []
+        if self.control_bounds is not None:
+            A_u_t, b_u_t = tighten_control_constraints(self.control_bounds, self.K, self.A_F, self.b_F)
+
+        # ------------ UNDISTURBED MODEL SETUP ------------- #
+        # for use in generating nominal control
+        model_type = 'discrete'
+        nominal_model = do_mpc.model.Model(model_type)
+
+        _x = nominal_model.set_variable(var_type='_x', var_name='x', shape=(self.state_dim,1))
+        _u = nominal_model.set_variable(var_type='_u', var_name='u', shape=(self.action_dim,1))
+
+        nominal_x_next = self.A@_x + self.B@_u 
+
+        nominal_model.set_rhs('x', nominal_x_next)
+
+        nominal_model.setup()
+
+        # ------------ CONTROLLER SETUP ------------- #
+        # solver for nominal control
+        mpc = do_mpc.controller.MPC(nominal_model)
+        setup_mpc = {'n_horizon': self.horizon,
+                     't_step': self.time_step,
+                     'state_dicretization': 'discrete',
+                     'store_full_solution': True}
         
-        for traj in trajectories:
-            for t in range(len(traj.obs) - 1):
-                states.append(traj.obs[t])
-                actions.append(traj.acts[t])
-                next_states.append(traj.obs[t + 1])
+        # currently assumes all constraints are simple bounding boxes
+        if self.state_bounds is not None: 
+            # lower bounds of the states
+            mpc.bounds['lower','_x','x'] = np.array([-b_x_t[1], -b_x_t[3]])
+
+            # upper bounds of the states
+            mpc.bounds['upper','_x','x'] = np.array([b_x_t[0], b_x_t[2]])
+
+        if self.control_bounds is not None:
+            # lower bounds of the input
+            mpc.bounds['lower','_u','u'] = -np.array([b_u_t[0]])
+
+            # upper bounds of the input
+            mpc.bounds['upper','_u','u'] =  np.array([b_u_t[1]])
         
-        states = np.array(states)
-        actions = np.array(actions)
-        next_states = np.array(next_states)
+        mpc.set_param(**setup_mpc)
+
+        # Objective
+        x = nominal_model.x['x']
+        u = nominal_model.u['u']
+
+        lterm = (x.T @ self.Q @ x)
+        mterm = x.T @ self.P @ x
+
+        mpc.settings.set_linear_solver()
+        mpc.set_objective(mterm=mterm, lterm=lterm)
+        mpc.set_rterm(ca.SX(self.R))
+
+        mpc.setup()
+
+        # ------------ DISTURBED MODEL & SIMULATOR SETUP ------------- #        
+        disturbed_model = do_mpc.model.Model(model_type)
+
+        _xd = disturbed_model.set_variable(var_type='_x', var_name='xd', shape=(self.state_dim,1))
+        _ud = disturbed_model.set_variable(var_type='_u', var_name='ud', shape=(self.action_dim,1))
+
+        # Set disturbance
+        _d = disturbed_model.set_variable(var_type='_p', var_name='d', shape=(self.state_dim,1))
+
+        disturbed_x_next = self.A@_xd + self.B@_ud + _d
+        disturbed_model.setup()
+
+        self.simulator = do_mpc.simulator.Simulator(disturbed_model)
+
+        d_template = self.simulator.get_p_template()
+
+        def d_fun(t_now):
+            d_template['d'] = sample_from_disturbance(self.disturbance_polytope)
+            return d_template
         
-        self.state_dim = states.shape[1]
-        self.action_dim = actions.shape[1]
-        
-        # Fit linear dynamics: x_{t+1} = A * x_t + B * u_t + w_t
-        # Stack [states, actions] as input matrix
-        inputs = np.hstack([states, actions])
-        
-        if method == "least_squares":
-            # Solve least squares: inputs @ theta = next_states
-            theta = np.linalg.lstsq(inputs, next_states, rcond=None)[0]
-        elif method == "ridge":
-            # Ridge regression for numerical stability
-            lambda_reg = 1e-4
-            theta = np.linalg.solve(
-                inputs.T @ inputs + lambda_reg * np.eye(inputs.shape[1]),
-                inputs.T @ next_states
-            )
-        else:
-            raise ValueError(f"Unknown fitting method: {method}")
-        
-        # Extract A and B matrices
-        self.A_matrices = [theta[:self.state_dim].T]
-        self.B_matrices = [theta[self.state_dim:].T]
-        
-        # Compute fitting error
-        predicted_next_states = inputs @ theta
-        mse = np.mean((next_states - predicted_next_states) ** 2)
-        
-        # Initialize cost matrices if not provided
-        if self.Q is None:
-            self.Q = np.eye(self.state_dim)
-        if self.R is None:
-            self.R = np.eye(self.action_dim)
-        
-        return {
-            "mse": mse,
-            "n_transitions": len(states),
-            "state_dim": self.state_dim,
-            "action_dim": self.action_dim,
-        }
+        self.simulator.set_p_fun(d_fun)
+
+        self.simulator.set_param(t_step = self.time_step)
+        self.simulator.setup()
+
+        print("Nominal and disturbed models, controller, and simulator setup completed!")
+
     
     def augment_trajectory(
         self, 
@@ -359,3 +407,199 @@ class RobustTubeMPC:
             }
         else:
             return {"mean_deviation": 0.0, "max_deviation": 0.0, "std_deviation": 0.0}
+
+
+
+def tighten_state_constraints(state_constraint_vertices: List[np.ndarray], A_F: np.ndarray, b_F: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Tightens state constraints using calculated mRPI H-rep
+
+    Args:
+        state_constraint_vertices (np.ndarray): list of state constraints of the form: [lower, upper] 
+        A_F (np.ndarray): A-matrix of mRPI H-rep set 
+        b_F (np.ndarray): b-vector of mRPI H-rep set
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: Tuple containing tightened A-matrix and tightened b-vector of state constraints 
+    """
+    A_x, b_x = box_to_Ab(state_constraint_vertices[0], state_constraint_vertices[1])
+
+    A_x_t, b_x_t = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
+
+    return A_x_t, b_x_t
+
+def tighten_control_constraints(control_constraint_vertices: np.ndarray, K: np.ndarray, A_F: np.ndarray, b_F: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Tightens control constraints using calculated mRPI H-rep
+
+    Args:
+        state_constraint_vertices (np.ndarray): list of control constraints of the form: [lower, upper] 
+        A_F (np.ndarray): A-matrix of mRPI H-rep set 
+        b_F (np.ndarray): b-vector of mRPI H-rep set
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: Tuple containing tightened A-matrix and tightened b-vector of control constraints
+    """
+    A_u, b_u = box_to_Ab(control_constraint_vertices[0], control_constraint_vertices[1])
+    A_u_t, b_u_t = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
+
+    return A_u_t, b_u_t
+
+
+
+
+def get_vertices(A, b):
+    """ Converts H-rep into a list of vertices """
+
+    # Form h-matrix and extract generators
+    mat = cdd.Matrix(np.hstack([b.reshape(-1,1), -A]), number_type='float')
+    mat.rep_type = cdd.RepType.INEQUALITY
+    poly = cdd.Polyhedron(mat)
+    generators = poly.get_generators()
+
+    # Convert to list of vertices
+    vertices = []
+    for generator in generators:
+        if generator[0] == 1:
+            vertices.append(generator[1:])
+    
+    return np.array(vertices, dtype=float)
+
+def sample_from_disturbance(W_polyhedron, n_samples=1):
+    """Sample uniformly from the disturbance polytope."""
+    vertices = W_polyhedron.V
+    
+    # Method 1: Rejection sampling for small polytopes
+    min_coords = np.min(vertices, axis=0)
+    max_coords = np.max(vertices, axis=0)
+    
+    samples = []
+    while len(samples) < n_samples:
+        candidate = np.random.uniform(min_coords, max_coords)
+        if W_polyhedron.contains(candidate):
+            samples.append(candidate)
+    
+    return np.array(samples) if n_samples > 1 else samples[0]
+
+def support_function(A, b, d):
+    # cdd wants [b | A] with inequalities in form b + A x >= 0
+    V = get_vertices(A, b)
+
+    d = np.asarray(d)
+    d = np.atleast_2d(d)      # shape (m, n_dirs)
+    return np.max(V @ d, axis=0)
+
+def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
+    """
+    Tighten state constraints X ⊖ F in H-rep.
+    A_x, b_x : original state constraints
+    A_F, b_F : H-rep of disturbance/error set F
+    """
+    import numpy as np
+
+    b_tight = []
+    for a, b in zip(A_x, b_x):
+        h = support_function_lp(A_F, b_F, a)   # your routine
+        b_tight.append(b - h)
+    return np.array(A_x, dtype=float), np.array(b_tight, dtype=float)
+
+def tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F):
+    """
+    Tighten input constraints U ⊖ K F in H-rep.
+    A_u, b_u : original input constraints
+    K        : feedback gain matrix
+    A_F, b_F : H-rep of disturbance/error set F
+    """
+    b_tight = []
+    for a, b in zip(A_u, b_u):
+        d = K.T @ a.reshape(-1,1)               # map direction
+        h = support_function_lp(A_F, b_F, d.flatten())
+        b_tight.append(b - h)
+    return np.array(A_u, dtype=float), np.array(b_tight, dtype=float)
+
+def box_to_Ab(lower, upper):
+    """
+    Convert simple box constraints (lower <= x <= upper)
+    into H-representation A, b such that A x <= b.
+    """
+    lower = np.array(lower).flatten()
+    upper = np.array(upper).flatten()
+    n = len(lower)
+
+    # For each dimension i:
+    #  x_i <= upper_i      ->  A row = e_i,   b = upper_i
+    # -x_i <= -lower_i     ->  A row = -e_i,  b = -lower_i
+    A = []
+    b = []
+    for i in range(n):
+        e_i = np.zeros(n)
+        e_i[i] = 1.0
+        A.append(e_i); b.append(upper[i])
+        A.append(-e_i); b.append(-lower[i])
+
+    return np.vstack(A), np.array(b)
+
+def support_function_lp(A, b, d):
+    A = np.asarray(A, dtype=float)
+    b = np.asarray(b, dtype=float)
+    h_repr = np.hstack([b.reshape(-1,1)])
+
+    lp_mat = cdd.Matrix(np.hstack([b.reshape(-1,1), -A]), number_type='float')
+    lp_mat.rep_type = cdd.RepType.INEQUALITY
+    lp_mat.obj_type = cdd.LPObjType.MAX
+    lp_mat.obj_func = (0,) + tuple(d)
+    lp = cdd.LinProg(lp_mat)
+    lp.solve()
+    
+    return lp.obj_value
+
+def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
+    """
+    Compute mRPI outer-approximation directly in H-rep (like MPT3).
+    Returns (A_F, b_F).
+    """
+    nx = Ak.shape[0]
+    s, alpha, Ms = 0, 1000, 1000
+
+    # Step 1: find s such that alpha small enough
+    while alpha > epsilon/(epsilon + Ms) and s < max_iter:
+        s += 1
+        dirs = (np.linalg.matrix_power(Ak, s) @ W_A.T).T
+        alpha = np.max([
+            support_function_lp(W_A, W_b, d) / bi
+            for d, bi in zip(dirs, W_b)
+        ])
+
+        mss = np.zeros((2*nx, 1))
+        for i in range(1, s+1):
+            mss += np.array([support_function(W_A, W_b, np.linalg.matrix_power(Ak, i)).reshape(-1, 1), support_function(W_A, W_b, -np.linalg.matrix_power(Ak, i)).reshape(-1, 1)]).reshape((2*nx, 1))
+        
+        Ms = max(mss)
+        
+        
+        # # crude Ms bound
+        # mss = []
+        # for i in range(1, s+1):
+        #     for d in [np.eye(nx)[j] for j in range(nx)]:
+        #         mss.append(support_function_lp(W_A, W_b, np.linalg.matrix_power(Ak,i) @ d))
+        #         mss.append(support_function_lp(W_A, W_b, -np.linalg.matrix_power(Ak,i) @ d))
+        # Ms = max(mss) if mss else Ms
+
+    # Step 2: build H-rep of F
+    A_F = W_A.copy()
+    b_F = []
+    Fs = pytope.Polytope(A = W_A, b = W_b)
+    for i in range (1,s):
+        Fs = Fs + np.linalg.matrix_power(Ak, i) * Fs
+    Fs = (1/1-alpha)*Fs
+    # for a, b in zip(W_A, W_b):
+    #     # sum support values in direction (A^k)^T a
+    #     s_val = 0.0
+    #     for k in range(s):
+    #         d = (np.linalg.matrix_power(Ak,k).T @ a)
+    #         s_val += support_function_lp(W_A, W_b, d)
+    #     b_F.append(s_val / (1 - alpha))
+    # b_F = np.array(b_F)
+
+    A_F = Fs.A
+    b_F = Fs.b
+
+    return A_F, b_F

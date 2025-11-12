@@ -2,6 +2,8 @@
 
 import abc
 import logging
+import os
+from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import gymnasium as gym
@@ -51,6 +53,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         irl_batch_size: int = 32,
         irl_lr: float = 1e-3,
         custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+        save_dir: Optional[str] = None,
         **kwargs,
     ):
         """Initialize NTRIL trainer.
@@ -79,6 +82,16 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         self.noise_levels = noise_levels
         self.n_rollouts_per_noise = n_rollouts_per_noise
         
+        if th.cuda.is_available():
+            self.device = th.device("cuda:0")
+        else:
+            self.device = th.device("cpu")
+
+        if save_dir is None:
+            self.save_dir = os.path.join(os.getcwd(), "ntril_runs", datetime.now().strftime("%Y%m%d-%H%M%S"))
+        else:
+            self.save_dir = save_dir
+        
         # Initialize components
         self.noise_injector = NoiseInjector()
         self.robust_mpc = RobustTubeMPC(
@@ -94,6 +107,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             policy=policy,
             demonstrations=demonstrations,
             batch_size=bc_batch_size,
+            device = self.device,
             custom_logger=self._logger,
             **(bc_train_kwargs or {}),
         )
@@ -174,9 +188,13 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
     def _train_bc_policy(self, **kwargs) -> Dict[str, Any]:
         """Train the initial BC policy."""
+        self.save_bc_policy_dir = os.path.join(self.save_dir, "BC_policy")
+        
         self.bc_trainer.train(**kwargs)
         self.bc_policy = self.bc_trainer.policy
         
+        util.save_policy(self.bc_policy, self.save_bc_policy_dir)
+
         # Evaluate BC policy
         bc_rollouts = rollout.rollout(
             self.bc_policy,
@@ -193,7 +211,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     def _generate_noisy_rollouts(self) -> Dict[str, Any]:
         """Generate rollouts with different noise levels."""
         if self.bc_policy is None:
-            raise ValueError("BC policy must be trained before generating noisy rollouts")
+            raise ValueError("BC policy must be trained/loaded before generating noisy rollouts")
         
         self.noisy_rollouts = []
         total_rollouts = 0
