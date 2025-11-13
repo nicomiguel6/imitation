@@ -13,16 +13,7 @@ from scipy.linalg import solve_discrete_are
 from scipy.spatial import ConvexHull
 import pytope
 
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
 
-from imitation.data import rollout
-from imitation.scripts.NTRIL.ntril import NTRILTrainer
-from imitation.scripts.NTRIL.utils import visualize_noise_levels, analyze_ranking_quality
-from imitation.data.wrappers import RolloutInfoWrapper
-from imitation.util import logger, util
-from imitation.util.logger import configure
-from imitation.data import serialize
 
 
 def main():
@@ -346,7 +337,6 @@ def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
     A_x, b_x : original state constraints
     A_F, b_F : H-rep of disturbance/error set F
     """
-    import numpy as np
 
     b_tight = []
     for a, b in zip(A_x, b_x):

@@ -1,7 +1,7 @@
 """Robust Tube Model Predictive Control for data augmentation in NTRIL pipeline."""
 
 import abc
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Sequence
 
 import numpy as np
 import torch as th
@@ -50,6 +50,7 @@ class RobustTubeMPC:
             B: Control Dynamics matrix
             Q: State cost matrix (if None, will be identity)
             R: Control cost matrix (if None, will be identity)
+            disturbance_vertices: Vertices of disturbance distribution
             control_bounds: Tuple of (lower_bound, upper_bound) for controls
             linearization_method: Method for linearizing dynamics
             finite_diff_eps: Epsilon for finite difference linearization
@@ -72,7 +73,7 @@ class RobustTubeMPC:
         self.action_dim = np.shape(B)[1]
     
     def setup(self):
-
+        """Initialize necessary objects for setting up MPC"""
         # ------------ PRELIMINARY SETS ------------- #
         # Solve for P, K matrices
         self.P = solve_discrete_are(self.A, self.B, self.Q, self.R)
@@ -146,6 +147,8 @@ class RobustTubeMPC:
 
         mpc.setup()
 
+        self.mpc = mpc
+
         # ------------ DISTURBED MODEL & SIMULATOR SETUP ------------- #        
         disturbed_model = do_mpc.model.Model(model_type)
 
@@ -173,69 +176,110 @@ class RobustTubeMPC:
 
         print("Nominal and disturbed models, controller, and simulator setup completed!")
 
+    def solve_mpc(self, initial_state: np.ndarray, total_steps: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Solve MPC for given initial states across a finite time horizon
+
+        Args:
+            initial_state (np.ndarray): Initial state of system
+            total_steps (int): Time  horizon length
+
+        Raises:
+            ValueError: If attempting to run this method without having set MPC and Simulator objects
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: states, controls for each timestep
+        """
+        if not self.mpc or self.simulator:
+            raise ValueError("Must set MPC and Simulator objects before attempting to solve")
+        
+        x0 = initial_state
+        self.mpc.x0 = x0
+        self.simulator.x0 = x0
+        self.mpc.set_initial_guess()
+
+        xs = []
+        us = []
+
+        for k in range(total_steps):
+            xs.append(x0)
+
+            u0 = self.mpc.make_step(x0)
+            nominal_x0 = self.mpc.data.prediction(('_x', 'x'))[:,0]
+            u_applied = u0 + self.K @ (x0.T.reshape(-1,) - nominal_x0.reshape(-1,))
+            y_next = self.simulator.make_step(u_applied)
+            x0 = y_next
+
+            us.append(u_applied)
+        
+        return xs, us
     
+
+
     def augment_trajectory(
         self, 
         trajectory: types.Trajectory,
-        noise_level: float,
+        partial_horizon: int = 50,
+        k_timesteps: int = 1,
         n_augmentations: int = 5,
-    ) -> types.Transitions:
-        """Augment a trajectory using robust tube MPC.
+    ) -> Sequence[types.TrajectoryWithRew]:
+        """Augment a trajectory using robust tube MPC. Sample points every k_timesteps and propagate partial trajectories following ancillary controller u = u0 + K(x-x0) .
         
         Args:
             trajectory: Trajectory to augment
-            noise_level: Noise level used to generate this trajectory
+            partial_horizon: Length of partial trajectory
+            k_timesteps: Interval of time steps to select sample from
             n_augmentations: Number of augmented samples per transition
             
         Returns:
-            Augmented transitions
+            Collection of partial trajectories sampled from RTMPC trajectory
         """
-        if not self.A_matrices or not self.B_matrices:
-            raise ValueError("Dynamics must be fitted before augmentation")
         
-        augmented_obs = []
+        augmented_obs = [] 
         augmented_acts = []
         augmented_next_obs = []
         augmented_dones = []
         augmented_infos = []
         
-        A = self.A_matrices[0]  # Use first (and only) fitted matrix
-        B = self.B_matrices[0]
         
         for t in range(len(trajectory.obs) - 1):
-            current_state = trajectory.obs[t]
-            current_action = trajectory.acts[t]
-            next_state = trajectory.obs[t + 1]
-            
-            # Generate augmented states around current state
-            for _ in range(n_augmentations):
-                # Sample disturbance for current state
-                disturbance = self._sample_disturbance()
-                augmented_state = current_state + disturbance
+            if t % k_timesteps == 0:
+
+                # Extract current state and action
+                current_state = trajectory.obs[t]
+                current_action = trajectory.acts[t]
+
+                # Sample points at center of bounding box facets
+
                 
-                # Solve robust tube MPC from augmented state
-                optimal_action = self._solve_tube_mpc(
-                    augmented_state, 
-                    trajectory.obs[t:],  # Remaining trajectory as reference
-                    noise_level
-                )
-                
-                # Predict next state using learned dynamics
-                predicted_next_state = A @ augmented_state + B @ optimal_action
-                
-                # Add small noise to next state to account for model uncertainty
-                next_state_noise = self._sample_disturbance(scale=0.5)
-                augmented_next_state = predicted_next_state + next_state_noise
-                
-                augmented_obs.append(augmented_state)
-                augmented_acts.append(optimal_action)
-                augmented_next_obs.append(augmented_next_state)
-                augmented_dones.append(False)
-                augmented_infos.append({
-                    "original_timestep": t,
-                    "noise_level": noise_level,
-                    "augmentation_method": "robust_tube_mpc",
-                })
+                # Generate augmented states around current state
+                for _ in range(n_augmentations):
+                    # Sample disturbance for current state
+                    disturbance = self._sample_disturbance()
+                    augmented_state = current_state + disturbance
+                    
+                    # Solve robust tube MPC from augmented state
+                    optimal_action = self._solve_tube_mpc(
+                        augmented_state, 
+                        trajectory.obs[t:],  # Remaining trajectory as reference
+                        noise_level
+                    )
+                    
+                    # Predict next state using learned dynamics
+                    predicted_next_state = A @ augmented_state + B @ optimal_action
+                    
+                    # Add small noise to next state to account for model uncertainty
+                    next_state_noise = self._sample_disturbance(scale=0.5)
+                    augmented_next_state = predicted_next_state + next_state_noise
+                    
+                    augmented_obs.append(augmented_state)
+                    augmented_acts.append(optimal_action)
+                    augmented_next_obs.append(augmented_next_state)
+                    augmented_dones.append(False)
+                    augmented_infos.append({
+                        "original_timestep": t,
+                        "noise_level": noise_level,
+                        "augmentation_method": "robust_tube_mpc",
+                    })
         
         return types.Transitions(
             obs=np.array(augmented_obs),
@@ -443,6 +487,32 @@ def tighten_control_constraints(control_constraint_vertices: np.ndarray, K: np.n
 
     return A_u_t, b_u_t
 
+def get_approximate_tube(Z_polyhedron: pytope.Polytope) -> pytope.Polytope:
+
+    # Extract vertices of polyhedron
+    verts = Z_polyhedron.V
+
+    max_points = []
+    min_points = []
+    b_matrix = []
+    A_matrix_list = []
+
+
+    # Iterate over each dim to extract max and min value
+    n_dim = len(verts[0])
+    for dim in range(n_dim):
+        temp = verts[:,dim]
+        tmp_vector = np.zeros((2,n_dim))
+        tmp_vector[:, dim] = np.array([1,-1])
+        max_points.append(np.max(temp))
+        min_points.append(np.min(temp))
+        b_matrix.append(np.max(temp))
+        b_matrix.append(-np.min(temp))
+        A_matrix_list.append(tmp_vector)
+    
+    A_matrix = np.vstack(A_matrix_list)
+
+    return pytope.Polytope(A_matrix, b_matrix)
 
 
 
