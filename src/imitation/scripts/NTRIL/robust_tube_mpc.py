@@ -87,6 +87,7 @@ class RobustTubeMPC:
 
         # Compute mrpi set
         self.A_F, self.b_F = compute_mrpi_hrep(self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b)
+        self.Z = pytope.Polytope(self.A_F, self.b_F)
 
         # Tighten state and constraint bounds accordingly
         if self.state_bounds is not None:
@@ -249,8 +250,15 @@ class RobustTubeMPC:
                 current_action = trajectory.acts[t]
 
                 # Sample points at center of bounding box facets
-
+                tube_set = current_state + self.Z
+                approx_tube = get_approximate_tube(tube_set)
+                samples = get_samples(approx_tube, corners = False)
                 
+                # simulate partial trajectory for each samples
+                for sample in samples:
+                    
+                    
+
                 # Generate augmented states around current state
                 for _ in range(n_augmentations):
                     # Sample disturbance for current state
@@ -488,7 +496,14 @@ def tighten_control_constraints(control_constraint_vertices: np.ndarray, K: np.n
     return A_u_t, b_u_t
 
 def get_approximate_tube(Z_polyhedron: pytope.Polytope) -> pytope.Polytope:
+    """Generate outer approximation bounding box for tube cross section Z
 
+    Args:
+        Z_polyhedron (pytope.Polytope): Tube polyhedron
+
+    Returns:
+        pytope.Polytope: Outer approximation polyhedron
+    """
     # Extract vertices of polyhedron
     verts = Z_polyhedron.V
 
@@ -498,7 +513,7 @@ def get_approximate_tube(Z_polyhedron: pytope.Polytope) -> pytope.Polytope:
     A_matrix_list = []
 
 
-    # Iterate over each dim to extract max and min value
+    # Iterate over each dim to extract max and min value, add to b matrix
     n_dim = len(verts[0])
     for dim in range(n_dim):
         temp = verts[:,dim]
@@ -510,9 +525,51 @@ def get_approximate_tube(Z_polyhedron: pytope.Polytope) -> pytope.Polytope:
         b_matrix.append(-np.min(temp))
         A_matrix_list.append(tmp_vector)
     
+    # form A_matrix 
     A_matrix = np.vstack(A_matrix_list)
 
     return pytope.Polytope(A_matrix, b_matrix)
+
+def get_samples(Z_polyhedron: pytope.Polytope, corners: bool = True) -> list[np.ndarray]:
+    """Get corner or face-center samples from polyhedron
+
+    Args:
+        Z_polyhedron (pytope.Polytope): polyhedron to sample
+        corners (bool, optional): Get corner samples. Defaults to True.
+
+    Returns:
+        list[np.ndarray]: list of sample points
+    """
+    n_dim = len(Z_polyhedron.V[0])
+    if corners:
+        # Collect corner cases
+        samples = Z_polyhedron.V
+    else:
+        # Collect facet-centers
+
+        samples = []
+        midpoints = []
+        minpoints = []
+        maxpoints = []
+
+        # Iterate over each dimension, extract midpoints
+        for dim in range(n_dim):
+            tmp = Z_polyhedron.V[:,dim]
+            midpoints.append((np.max(tmp) - np.min(tmp))/2.0)
+            minpoints.append(np.min(tmp))
+            maxpoints.append(np.max(tmp))
+        
+        # Form vertices
+        for i_dim in range(n_dim):
+            for j_dim in range(n_dim):
+                if j_dim == i_dim:
+                    break
+
+                samples.append(np.array([midpoints[i_dim], minpoints[j_dim]]))
+                samples.append(np.array([midpoints[i_dim], maxpoints[j_dim]]))
+        
+    
+    return samples
 
 
 
