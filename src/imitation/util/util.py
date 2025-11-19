@@ -28,7 +28,7 @@ import torch as th
 from stable_baselines3.common import monitor, policies
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 
-from imitation.data.types import AnyPath
+from imitation.data.types import AnyPath, TrajectoryWithRew, stack_maybe_dictobs
 
 
 def save_policy(policy: policies.BasePolicy, policy_path: AnyPath) -> None:
@@ -476,3 +476,42 @@ def clear_screen() -> None:
         os.system("cls")  # pragma: no cover
     else:
         os.system("clear")
+
+class TrajectoryBuilder:
+    """Accumulate steps and produce a TrajectoryWithRew at the end."""
+    def __init__(self):
+        self._obs = []   # list of observations (initial obs first)
+        self._acts = []
+        self._rews = []
+        self._infos = []
+
+    def start_episode(self, initial_obs):
+        self._obs = [np.asarray(initial_obs)]
+        self._acts = []
+        self._rews = []
+        self._infos = []
+
+    def add_step(self, action, next_obs, reward, info=None):
+        """Add one transition: action taken at last obs -> next_obs, reward, info."""
+        if len(self._obs) == 0:
+            raise RuntimeError("Call start_episode(initial_obs) before add_step()")
+        self._acts.append(np.asarray(action))
+        self._rews.append(float(reward))
+        self._infos.append({} if info is None else dict(info))
+        self._obs.append(np.asarray(next_obs))
+
+    def finish(self, terminal: bool = True) -> TrajectoryWithRew:
+        """Return immutable TrajectoryWithRew."""
+        # Convert lists to arrays with correct shapes
+        obs_arr = stack_maybe_dictobs(self._obs) if isinstance(self._obs[0], dict) else np.stack(self._obs, axis=0)
+        acts_arr = np.asarray(self._acts)
+        rews_arr = np.asarray(self._rews, dtype=float)
+        infos_arr = np.asarray(self._infos, dtype=object) if self._infos else None
+
+        return TrajectoryWithRew(
+            obs=obs_arr,
+            acts=acts_arr,
+            infos=infos_arr,
+            terminal=terminal,
+            rews=rews_arr,
+        )

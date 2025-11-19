@@ -160,6 +160,7 @@ class RobustTubeMPC:
         _d = disturbed_model.set_variable(var_type='_p', var_name='d', shape=(self.state_dim,1))
 
         disturbed_x_next = self.A@_xd + self.B@_ud + _d
+        disturbed_model.set_rhs(disturbed_x_next)
         disturbed_model.setup()
 
         self.simulator = do_mpc.simulator.Simulator(disturbed_model)
@@ -235,67 +236,59 @@ class RobustTubeMPC:
             Collection of partial trajectories sampled from RTMPC trajectory
         """
         
-        augmented_obs = [] 
-        augmented_acts = []
-        augmented_next_obs = []
-        augmented_dones = []
         augmented_infos = []
         
+        augmented_trajs = []
         
         for t in range(len(trajectory.obs) - 1):
             if t % k_timesteps == 0:
+                
+                augmented_trajs_t = []
 
-                # Extract current state and action
-                current_state = trajectory.obs[t]
-                current_action = trajectory.acts[t]
+                # Extract current nominal state and action
+                current_nominal_state = trajectory.obs[t]
+                current_nominal_action = trajectory.acts[t]
 
                 # Sample points at center of bounding box facets
-                tube_set = current_state + self.Z
+                tube_set = current_nominal_state + self.Z
                 approx_tube = get_approximate_tube(tube_set)
                 samples = get_samples(approx_tube, corners = False)
                 
-                # simulate partial trajectory for each samples
+                # simulate partial trajectory for each samples (should be cheap as it's only propagating dynamics)
                 for sample in samples:
                     
+                    # initialize trajectory builder
+                    builder = util.TrajectoryBuilder()
+                    builder.start_episode(initial_obs=sample)
                     
+                    x = sample
+                    u = current_nominal_action
+                    self.simulator.x0 = x
 
-                # Generate augmented states around current state
-                for _ in range(n_augmentations):
-                    # Sample disturbance for current state
-                    disturbance = self._sample_disturbance()
-                    augmented_state = current_state + disturbance
-                    
-                    # Solve robust tube MPC from augmented state
-                    optimal_action = self._solve_tube_mpc(
-                        augmented_state, 
-                        trajectory.obs[t:],  # Remaining trajectory as reference
-                        noise_level
-                    )
-                    
-                    # Predict next state using learned dynamics
-                    predicted_next_state = A @ augmented_state + B @ optimal_action
-                    
-                    # Add small noise to next state to account for model uncertainty
-                    next_state_noise = self._sample_disturbance(scale=0.5)
-                    augmented_next_state = predicted_next_state + next_state_noise
-                    
-                    augmented_obs.append(augmented_state)
-                    augmented_acts.append(optimal_action)
-                    augmented_next_obs.append(augmented_next_state)
-                    augmented_dones.append(False)
+                    # propagate dynamics
+                    for t_step in range(partial_horizon-1):
+                        u_applied = current_nominal_action + self.K @ (x.T.reshape(-1,) - current_nominal_state.reshape(-1,))
+                        x_next = self.simulator.make_step(u0=u_applied)
+                        builder.add_step(action=u_applied, next_obs=x_next, reward=0.0, info={})
+                        x = x_next
+
+                        current_nominal_state = trajectory.obs[t+t_step]
+                        current_nominal_action = trajectory.obs[t+t_step]
+
+                    # finalize trajectory
+                    traj = builder.finish(terminal=True)
+
+                    augmented_trajs_t.append(traj)
+            
                     augmented_infos.append({
                         "original_timestep": t,
-                        "noise_level": noise_level,
+                        "noise_level": 7,
                         "augmentation_method": "robust_tube_mpc",
                     })
+                
+                augmented_trajs.append(augmented_trajs_t)
         
-        return types.Transitions(
-            obs=np.array(augmented_obs),
-            acts=np.array(augmented_acts),
-            next_obs=np.array(augmented_next_obs),
-            dones=np.array(augmented_dones),
-            infos=np.array(augmented_infos),
-        )
+        return augmented_trajs
     
     def _sample_disturbance(self, scale: float = 1.0) -> np.ndarray:
         """Sample a disturbance from the disturbance set.
@@ -314,116 +307,6 @@ class RobustTubeMPC:
         direction /= np.linalg.norm(direction)
         radius = np.random.uniform(0, self.disturbance_bound * scale)
         return direction * radius
-    
-    def _solve_tube_mpc(
-        self,
-        initial_state: np.ndarray,
-        reference_trajectory: np.ndarray,
-        noise_level: float,
-    ) -> np.ndarray:
-        """Solve robust tube MPC optimization problem.
-        
-        Args:
-            initial_state: Initial state for MPC
-            reference_trajectory: Reference trajectory to follow
-            noise_level: Current noise level (affects tube size)
-            
-        Returns:
-            Optimal first control action
-        """
-        if not self.A_matrices or not self.B_matrices:
-            raise ValueError("Dynamics must be fitted")
-        
-        A = self.A_matrices[0]
-        B = self.B_matrices[0]
-        
-        # Adjust tube radius based on noise level
-        current_tube_radius = self.tube_radius * (1 + noise_level)
-        
-        # MPC horizon (limited by reference trajectory length)
-        mpc_horizon = min(self.horizon, len(reference_trajectory))
-        
-        # Decision variables: [u_0, u_1, ..., u_{N-1}]
-        n_vars = self.action_dim * mpc_horizon
-        
-        def objective(u_vec):
-            """MPC objective function."""
-            u_sequence = u_vec.reshape((mpc_horizon, self.action_dim))
-            
-            cost = 0.0
-            state = initial_state.copy()
-            
-            for k in range(mpc_horizon):
-                # State cost (tracking reference)
-                if k < len(reference_trajectory):
-                    ref_state = reference_trajectory[k]
-                    state_error = state - ref_state
-                    cost += state_error.T @ self.Q @ state_error
-                
-                # Control cost
-                control = u_sequence[k]
-                cost += control.T @ self.R @ control
-                
-                # Predict next state
-                if k < mpc_horizon - 1:
-                    state = A @ state + B @ control
-            
-            return cost
-        
-        def constraint_func(u_vec):
-            """Constraint function for tube constraints."""
-            u_sequence = u_vec.reshape((mpc_horizon, self.action_dim))
-            
-            constraints = []
-            state = initial_state.copy()
-            
-            for k in range(mpc_horizon):
-                # Tube constraint: ||x_k - x_ref_k|| <= tube_radius
-                if k < len(reference_trajectory):
-                    ref_state = reference_trajectory[k]
-                    state_error_norm = np.linalg.norm(state - ref_state)
-                    constraints.append(current_tube_radius - state_error_norm)
-                
-                # Predict next state
-                if k < mpc_horizon - 1:
-                    control = u_sequence[k]
-                    state = A @ state + B @ control
-            
-            return np.array(constraints)
-        
-        # Initial guess (zero controls)
-        u0 = np.zeros(n_vars)
-        
-        # Control bounds
-        bounds = None
-        if self.control_bounds is not None:
-            lower_bounds = np.tile(self.control_bounds[0], mpc_horizon)
-            upper_bounds = np.tile(self.control_bounds[1], mpc_horizon)
-            bounds = list(zip(lower_bounds, upper_bounds))
-        
-        # Solve optimization
-        constraints = {'type': 'ineq', 'fun': constraint_func}
-        
-        try:
-            result = minimize(
-                objective,
-                u0,
-                method='SLSQP',
-                bounds=bounds,
-                constraints=constraints,
-                options={'maxiter': 100, 'ftol': 1e-6}
-            )
-            
-            if result.success:
-                optimal_controls = result.x.reshape((mpc_horizon, self.action_dim))
-                return optimal_controls[0]  # Return first control action
-            else:
-                # Fallback: return zero control
-                return np.zeros(self.action_dim)
-                
-        except Exception:
-            # Fallback: return zero control
-            return np.zeros(self.action_dim)
     
     def get_tube_statistics(
         self, 
@@ -570,8 +453,6 @@ def get_samples(Z_polyhedron: pytope.Polytope, corners: bool = True) -> list[np.
         
     
     return samples
-
-
 
 def get_vertices(A, b):
     """ Converts H-rep into a list of vertices """
