@@ -12,14 +12,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from imitation.data import rollout
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector, NoisyPolicy
-from imitation.scripts.NTRIL.ntril import NTRILTrainer
-from imitation.scripts.NTRIL.utils import visualize_noise_levels, analyze_ranking_quality
 from imitation.algorithms import bc
-from imitation.algorithms.bc import BC
 from imitation.data.wrappers import RolloutInfoWrapper
-from imitation.util import logger, util
-from imitation.util.logger import configure
-from imitation.data import serialize
+from imitation.util import util
 
 def main():
 

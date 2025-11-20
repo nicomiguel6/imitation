@@ -413,7 +413,7 @@ def get_approximate_tube(Z_polyhedron: pytope.Polytope) -> pytope.Polytope:
 
     return pytope.Polytope(A_matrix, b_matrix)
 
-def get_samples(Z_polyhedron: pytope.Polytope, corners: bool = True) -> list[np.ndarray]:
+def get_samples(Z_polyhedron: pytope.Polytope, corners: bool = True) -> List[np.ndarray]:
     """Get corner or face-center samples from polyhedron
 
     Args:
