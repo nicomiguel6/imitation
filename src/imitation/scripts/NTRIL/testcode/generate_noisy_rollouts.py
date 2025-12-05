@@ -46,9 +46,12 @@ def main():
         label_info={'noise_level': epsilon},
     )
 
-    a = 5
+    # Count noise deviations
+    for i, traj in enumerate(expert_trajectories[:3]):  # Check first 3
+        noise_count = sum(info.get("noise_applied", False) for info in traj.infos)
+        print(f"Trajectory {i}: {noise_count}/{len(traj)} timesteps had noise")
 
-
+    
 
 if __name__=="__main__":
     main()
