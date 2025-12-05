@@ -451,7 +451,19 @@ def generate_trajectories(
     while np.any(active):
         # policy gets unwrapped observations (eg as dict, not dictobs)
         acts, state = get_actions(obs, state, dones)
+
+        # Read per-environment noise mask from policy (if available)
+        noise_mask = None
+        if hasattr(policy, "last_noise_mask"):
+            noise_mask = policy.last_noise_mask
+            # Sanity check: ensure mask shape matches number of environments
+            if noise_mask is not None and len(noise_mask) != venv.num_envs:
+                noise_mask = None  # Ignore if shape doesn't match
+
+
         obs, rews, dones, infos = venv.step(acts)
+
+
         assert isinstance(
             obs,
             (np.ndarray, dict),
@@ -464,8 +476,25 @@ def generate_trajectories(
         # by just making it never done.
         dones &= active
 
-        if label_info is not None:
-            infos = [{**info, **label_info} for info in infos]
+        # if label_info is not None:
+        #     infos = [{**info, **label_info} for info in infos]
+
+        # Merge per-environment noise info and label_info into infos
+        if noise_mask is not None or label_info is not None:
+            for env_idx in range(venv.num_envs):
+                # Start with existing info from environment
+                merged_info = dict(infos[env_idx])
+                
+                # Add noise_applied boolean for this specific environment
+                if noise_mask is not None:
+                    merged_info["noise_applied"] = bool(noise_mask[env_idx])
+                
+                # Add label_info (same for all envs, like noise_level)
+                if label_info is not None:
+                    merged_info.update(label_info)
+                
+                # Replace the info dict
+                infos[env_idx] = merged_info
 
         new_trajs = trajectories_accum.add_steps_and_auto_finish(
             acts,

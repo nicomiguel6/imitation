@@ -155,28 +155,79 @@ class EpsilonGreedyNoiseInjector(BaseNoiseInjector):
     ) -> Tuple[th.Tensor, bool]:
         """With probability epsilon, return a random action; else, return base_action."""
 
-        noise_applied = False
-        if np.random.rand() < noise_level:
-            # Track noise application
-            noise_applied = True
-            if isinstance(action_space, gym.spaces.Box):
-                random_action = th.from_numpy(
-                    np.random.uniform(
-                        low=action_space.low,
-                        high=action_space.high,
-                        size=base_action.shape
-                    )
-                ).to(base_action.device, dtype=base_action.dtype)
-            elif isinstance(action_space, gym.spaces.Discrete):
-                random_action = th.tensor(
-                    np.random.randint(action_space.n, size=base_action.shape),
-                    device=base_action.device,
-                    dtype=base_action.dtype,
-                )
-            else:
-                raise NotImplementedError("Epsilon-greedy not implemented for this action space.")
-            return random_action
-        return base_action
+        # Determine batch size (number of parallel environments)
+        batch_size = base_action.shape[0]
+        
+        # Make independent noise decision for EACH environment
+        noise_mask = np.random.rand(batch_size) < noise_level  # Shape: (n_envs,)
+        
+        # If no environments need noise, return early
+        if not noise_mask.any():
+            return base_action, noise_mask
+        
+        # Start with base actions, will modify only the noisy ones
+        noisy_actions = base_action.clone()
+        
+        # Apply random actions only to environments where noise_mask is True
+        if isinstance(action_space, gym.spaces.Discrete):
+            # Discrete actions: shape (n_envs,)
+            # Generate random actions for noisy environments
+            random_actions = np.random.randint(
+                low=0,
+                high=action_space.n,
+                size=noise_mask.sum(),  # Only generate for noisy envs
+            )
+            # Convert to tensor and assign to noisy positions
+            noisy_actions[noise_mask] = th.tensor(
+                random_actions,
+                device=base_action.device,
+                dtype=base_action.dtype,
+            )
+            
+        elif isinstance(action_space, gym.spaces.Box):
+            # Continuous actions: shape (n_envs, action_dim)
+            action_dim = base_action.shape[1:]
+            
+            # Generate random actions for noisy environments
+            random_actions = np.random.uniform(
+                low=action_space.low,
+                high=action_space.high,
+                size=(noise_mask.sum(), *action_dim),  # Only for noisy envs
+            )
+            # Convert to tensor and assign to noisy positions
+            noisy_actions[noise_mask] = th.from_numpy(random_actions).to(
+                device=base_action.device,
+                dtype=base_action.dtype,
+            )
+        else:
+            raise NotImplementedError(
+                f"Epsilon-greedy not implemented for {type(action_space)}"
+            )
+        
+        return noisy_actions, noise_mask
+
+        # noise_applied = False
+        # if np.random.rand() < noise_level:
+        #     # Track noise application
+        #     noise_applied = True
+        #     if isinstance(action_space, gym.spaces.Box):
+        #         random_action = th.from_numpy(
+        #             np.random.uniform(
+        #                 low=action_space.low,
+        #                 high=action_space.high,
+        #                 size=base_action.shape
+        #             )
+        #         ).to(base_action.device, dtype=base_action.dtype)
+        #     elif isinstance(action_space, gym.spaces.Discrete):
+        #         random_action = th.tensor(
+        #             np.random.randint(action_space.n, size=base_action.shape),
+        #             device=base_action.device,
+        #             dtype=base_action.dtype,
+        #         )
+        #     else:
+        #         raise NotImplementedError("Epsilon-greedy not implemented for this action space.")
+        #     return random_action
+        # return base_action
 
 
 class NoisyPolicy(policies.BasePolicy):
@@ -207,43 +258,83 @@ class NoisyPolicy(policies.BasePolicy):
         self.base_policy = base_policy
         self.noise_injector = noise_injector
         self.noise_level = noise_level
-        self.last_noise_applied = False
 
-        # Track noise count
-        self.noise_counts = {} # {env_idx: count}
-    
-    def reset_noise_count(self, env_idx: int = 0):
-        """Reset noise count for a specific environment (called on episode start)."""
-        self.noise_counts[env_idx] = 0
-    
-    def get_noise_count(self, env_idx: int = 0) -> int:
-        """Get noise count for a specific environment."""
-        return self.noise_counts.get(env_idx, 0)
-    
+        # Store per-environment noise mask from last prediction
+        # Shape: (n_envs,) boolean array
+        # This will be read by rollout code to populate infos
+        self.last_noise_mask: Optional[np.ndarray] = None
+
     def _predict(
         self, 
         observation: th.Tensor, 
         deterministic: bool = False,
     ) -> th.Tensor:
-        """Predict action with noise injection."""
+        """Predict action with noise injection.
+        
+        Stores per-environment noise application status in self.last_noise_mask.
+        """
+        # Get base actions from the wrapped policy
         base_action = self.base_policy._predict(observation, deterministic)
-
+        
+        # Handle cases where no noise should be applied
         if self.noise_level == 0.0 or deterministic or self.noise_injector is None:
+            # No noise applied - create all-False mask
+            batch_size = observation.shape[0]
+            self.last_noise_mask = np.zeros(batch_size, dtype=bool)
             return base_action
-
-        # Use the noise injector's apply_noise method if it exists
+        
+        # Apply noise and get per-environment mask
         if hasattr(self.noise_injector, "apply_noise"):
-            action = self.noise_injector.apply_noise(
-                base_action, self.action_space, self.noise_level
+            noisy_action, noise_mask = self.noise_injector.apply_noise(
+                base_action, 
+                self.action_space, 
+                self.noise_level
             )
-            return action
+            # Store the mask so rollout code can read it
+            self.last_noise_mask = noise_mask  # Shape: (n_envs,) boolean array
+            return noisy_action
         else:
-            # fallback: return base_action (or implement other noise logic)
+            # Fallback if injector doesn't have apply_noise
+            batch_size = observation.shape[0]
+            self.last_noise_mask = np.zeros(batch_size, dtype=bool)
             return base_action
     
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
         """Forward pass through the policy."""
         return self._predict(obs, deterministic)
+    
+    # def reset_noise_count(self, env_idx: int = 0):
+    #     """Reset noise count for a specific environment (called on episode start)."""
+    #     self.noise_counts[env_idx] = 0
+    
+    # def get_noise_count(self, env_idx: int = 0) -> int:
+    #     """Get noise count for a specific environment."""
+    #     return self.noise_counts.get(env_idx, 0)
+    
+    # def _predict(
+    #     self, 
+    #     observation: th.Tensor, 
+    #     deterministic: bool = False,
+    # ) -> th.Tensor:
+    #     """Predict action with noise injection."""
+    #     base_action = self.base_policy._predict(observation, deterministic)
+
+    #     if self.noise_level == 0.0 or deterministic or self.noise_injector is None:
+    #         return base_action
+
+    #     # Use the noise injector's apply_noise method if it exists
+    #     if hasattr(self.noise_injector, "apply_noise"):
+    #         action = self.noise_injector.apply_noise(
+    #             base_action, self.action_space, self.noise_level
+    #         )
+    #         return action
+    #     else:
+    #         # fallback: return base_action (or implement other noise logic)
+    #         return base_action
+    
+    # def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
+    #     """Forward pass through the policy."""
+    #     return self._predict(obs, deterministic)
 
 
 class NoiseInjector:
