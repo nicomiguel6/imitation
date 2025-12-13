@@ -213,6 +213,9 @@ class RobustTubeMPC:
 
             us.append(u_applied)
         
+        self.xs = xs
+        self.us = us
+        
         return xs, us
     
 
@@ -342,8 +345,20 @@ class RobustTubeMPC:
             }
         else:
             return {"mean_deviation": 0.0, "max_deviation": 0.0, "std_deviation": 0.0}
+        
+    
+    def _compute_tracking_cost_metric(self, x: np.ndarray, u: Optional[np.ndarray], k: int) -> np.float64:
 
 
+        # extract reference solution
+        xs = self.xs[k]
+        x_difference = x - xs
+        if u:
+            us = self.us[k]
+            u_difference = u - us
+            return x_difference.T @ self.Q @ x_difference + u_difference.T @ self.R @ u_difference
+        
+        return x_difference.T @ self.Q @ x_difference
 
 def tighten_state_constraints(state_constraint_vertices: List[np.ndarray], A_F: np.ndarray, b_F: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Tightens state constraints using calculated mRPI H-rep
