@@ -18,11 +18,11 @@ from imitation.util import util
 
 class RobustTubeMPC:
     """Robust Tube Model Predictive Control for trajectory augmentation.
-    
+
     This class implements linear robust tube MPC under a specified disturbance set
     to augment state-action pairs using Tagliabue's method.
     """
-    
+
     def __init__(
         self,
         horizon: int = 10,
@@ -40,7 +40,7 @@ class RobustTubeMPC:
         finite_diff_eps: float = 1e-6,
     ):
         """Initialize Robust Tube MPC.
-        
+
         Args:
             horizon: MPC prediction horizon
             time_step: discretization time step
@@ -68,78 +68,96 @@ class RobustTubeMPC:
         self.control_bounds = control_bounds
         self.linearization_method = linearization_method
         self.finite_diff_eps = finite_diff_eps
-        
+
         self.state_dim = np.shape(A)[1]
         self.action_dim = np.shape(B)[1]
-    
+
     def setup(self):
         """Initialize necessary objects for setting up MPC"""
         # ------------ PRELIMINARY SETS ------------- #
         # Solve for P, K matrices
         self.P = solve_discrete_are(self.A, self.B, self.Q, self.R)
-        self.K = -np.linalg.inv(self.B.T @ self.P @ self.B + self.R) @ (self.B @ self.P @ self.A)
+        self.K = -np.linalg.inv(self.B.T @ self.P @ self.B + self.R) @ (
+            self.B @ self.P @ self.A
+        )
 
         # Closed loop
-        self.Ak = self.A + self.B@self.K
+        self.Ak = self.A + self.B @ self.K
 
         # Set up disturbance polytope
         self.disturbance_polytope = pytope.Polytope(self.disturbance_vertices)
 
         # Compute mrpi set
-        self.A_F, self.b_F = compute_mrpi_hrep(self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b)
+        self.A_F, self.b_F = compute_mrpi_hrep(
+            self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b
+        )
         self.Z = pytope.Polytope(self.A_F, self.b_F)
 
         # Tighten state and constraint bounds accordingly
         if self.state_bounds is not None:
-            A_x_t, b_x_t = tighten_state_constraints(self.state_bounds, self.A_F, self.b_F)
-        
+            A_x_t, b_x_t = tighten_state_constraints(
+                self.state_bounds, self.A_F, self.b_F
+            )
+            self.A_x_t = A_x_t
+            self.b_x_t = b_x_t
+
         if self.control_bounds is not None:
-            A_u_t, b_u_t = tighten_control_constraints(self.control_bounds, self.K, self.A_F, self.b_F)
+            A_u_t, b_u_t = tighten_control_constraints(
+                self.control_bounds, self.K, self.A_F, self.b_F
+            )
+            self.A_u_t = A_u_t
+            self.b_u_t = b_u_t
 
         # ------------ UNDISTURBED MODEL SETUP ------------- #
         # for use in generating nominal control
-        model_type = 'discrete'
+        model_type = "discrete"
         nominal_model = do_mpc.model.Model(model_type)
 
-        _x = nominal_model.set_variable(var_type='_x', var_name='x', shape=(self.state_dim,1))
-        _u = nominal_model.set_variable(var_type='_u', var_name='u', shape=(self.action_dim,1))
+        _x = nominal_model.set_variable(
+            var_type="_x", var_name="x", shape=(self.state_dim, 1)
+        )
+        _u = nominal_model.set_variable(
+            var_type="_u", var_name="u", shape=(self.action_dim, 1)
+        )
 
-        nominal_x_next = self.A@_x + self.B@_u 
+        nominal_x_next = self.A @ _x + self.B @ _u
 
-        nominal_model.set_rhs('x', nominal_x_next)
+        nominal_model.set_rhs("x", nominal_x_next)
 
         nominal_model.setup()
 
         # ------------ CONTROLLER SETUP ------------- #
         # solver for nominal control
         mpc = do_mpc.controller.MPC(nominal_model)
-        setup_mpc = {'n_horizon': self.horizon,
-                     't_step': self.time_step,
-                     'state_dicretization': 'discrete',
-                     'store_full_solution': True}
-        
+        setup_mpc = {
+            "n_horizon": self.horizon,
+            "t_step": self.time_step,
+            "state_dicretization": "discrete",
+            "store_full_solution": True,
+        }
+
         # currently assumes all constraints are simple bounding boxes
-        if self.state_bounds is not None: 
+        if self.state_bounds is not None:
             # lower bounds of the states
-            mpc.bounds['lower','_x','x'] = np.array([-b_x_t[1], -b_x_t[3]])
+            mpc.bounds["lower", "_x", "x"] = np.array([-b_x_t[1], -b_x_t[3]])
 
             # upper bounds of the states
-            mpc.bounds['upper','_x','x'] = np.array([b_x_t[0], b_x_t[2]])
+            mpc.bounds["upper", "_x", "x"] = np.array([b_x_t[0], b_x_t[2]])
 
         if self.control_bounds is not None:
             # lower bounds of the input
-            mpc.bounds['lower','_u','u'] = -np.array([b_u_t[0]])
+            mpc.bounds["lower", "_u", "u"] = -np.array([b_u_t[0]])
 
             # upper bounds of the input
-            mpc.bounds['upper','_u','u'] =  np.array([b_u_t[1]])
-        
+            mpc.bounds["upper", "_u", "u"] = np.array([b_u_t[1]])
+
         mpc.set_param(**setup_mpc)
 
         # Objective
-        x = nominal_model.x['x']
-        u = nominal_model.u['u']
+        x = nominal_model.x["x"]
+        u = nominal_model.u["u"]
 
-        lterm = (x.T @ self.Q @ x)
+        lterm = x.T @ self.Q @ x
         mterm = x.T @ self.P @ x
 
         mpc.settings.set_linear_solver()
@@ -150,16 +168,22 @@ class RobustTubeMPC:
 
         self.mpc = mpc
 
-        # ------------ DISTURBED MODEL & SIMULATOR SETUP ------------- #        
+        # ------------ DISTURBED MODEL & SIMULATOR SETUP ------------- #
         disturbed_model = do_mpc.model.Model(model_type)
 
-        _xd = disturbed_model.set_variable(var_type='_x', var_name='xd', shape=(self.state_dim,1))
-        _ud = disturbed_model.set_variable(var_type='_u', var_name='ud', shape=(self.action_dim,1))
+        _xd = disturbed_model.set_variable(
+            var_type="_x", var_name="xd", shape=(self.state_dim, 1)
+        )
+        _ud = disturbed_model.set_variable(
+            var_type="_u", var_name="ud", shape=(self.action_dim, 1)
+        )
 
         # Set disturbance
-        _d = disturbed_model.set_variable(var_type='_p', var_name='d', shape=(self.state_dim,1))
+        _d = disturbed_model.set_variable(
+            var_type="_p", var_name="d", shape=(self.state_dim, 1)
+        )
 
-        disturbed_x_next = self.A@_xd + self.B@_ud + _d
+        disturbed_x_next = self.A @ _xd + self.B @ _ud + _d
         disturbed_model.set_rhs(disturbed_x_next)
         disturbed_model.setup()
 
@@ -168,17 +192,21 @@ class RobustTubeMPC:
         d_template = self.simulator.get_p_template()
 
         def d_fun(t_now):
-            d_template['d'] = sample_from_disturbance(self.disturbance_polytope)
+            d_template["d"] = sample_from_disturbance(self.disturbance_polytope)
             return d_template
-        
+
         self.simulator.set_p_fun(d_fun)
 
-        self.simulator.set_param(t_step = self.time_step)
+        self.simulator.set_param(t_step=self.time_step)
         self.simulator.setup()
 
-        print("Nominal and disturbed models, controller, and simulator setup completed!")
+        print(
+            "Nominal and disturbed models, controller, and simulator setup completed!"
+        )
 
-    def solve_mpc(self, initial_state: np.ndarray, total_steps: int) -> Tuple[np.ndarray, np.ndarray]:
+    def solve_mpc(
+        self, initial_state: np.ndarray, total_steps: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """Solve MPC for given initial states across a finite time horizon
 
         Args:
@@ -192,8 +220,10 @@ class RobustTubeMPC:
             Tuple[np.ndarray, np.ndarray]: states, controls for each timestep
         """
         if not self.mpc or self.simulator:
-            raise ValueError("Must set MPC and Simulator objects before attempting to solve")
-        
+            raise ValueError(
+                "Must set MPC and Simulator objects before attempting to solve"
+            )
+
         x0 = initial_state
         self.mpc.x0 = x0
         self.simulator.x0 = x0
@@ -206,46 +236,51 @@ class RobustTubeMPC:
             xs.append(x0)
 
             u0 = self.mpc.make_step(x0)
-            nominal_x0 = self.mpc.data.prediction(('_x', 'x'))[:,0]
-            u_applied = u0 + self.K @ (x0.T.reshape(-1,) - nominal_x0.reshape(-1,))
+            nominal_x0 = self.mpc.data.prediction(("_x", "x"))[:, 0]
+            u_applied = u0 + self.K @ (
+                x0.T.reshape(
+                    -1,
+                )
+                - nominal_x0.reshape(
+                    -1,
+                )
+            )
             y_next = self.simulator.make_step(u_applied)
             x0 = y_next
 
             us.append(u_applied)
-        
+
         self.xs = xs
         self.us = us
-        
-        return xs, us
-    
 
+        return xs, us
 
     def augment_trajectory(
-        self, 
+        self,
         trajectory: types.Trajectory,
         partial_horizon: int = 50,
         k_timesteps: int = 1,
         n_augmentations: int = 5,
     ) -> Sequence[types.TrajectoryWithRew]:
         """Augment a trajectory using robust tube MPC. Sample points every k_timesteps and propagate partial trajectories following ancillary controller u = u0 + K(x-x0) .
-        
+
         Args:
             trajectory: Trajectory to augment
             partial_horizon: Length of partial trajectory
             k_timesteps: Interval of time steps to select sample from
             n_augmentations: Number of augmented samples per transition
-            
+
         Returns:
             Collection of partial trajectories sampled from RTMPC trajectory
         """
-        
+
         augmented_infos = []
-        
+
         augmented_trajs = []
-        
+
         for t in range(len(trajectory.obs) - 1):
             if t % k_timesteps == 0:
-                
+
                 augmented_trajs_t = []
 
                 # Extract current nominal state and action
@@ -255,121 +290,145 @@ class RobustTubeMPC:
                 # Sample points at center of bounding box facets
                 tube_set = current_nominal_state + self.Z
                 approx_tube = get_approximate_tube(tube_set)
-                samples = get_samples(approx_tube, corners = False)
-                
+                samples = get_samples(approx_tube, corners=False)
+
                 # simulate partial trajectory for each samples (should be cheap as it's only propagating dynamics)
                 for sample in samples:
-                    
+
                     # initialize trajectory builder
                     builder = util.TrajectoryBuilder()
                     builder.start_episode(initial_obs=sample)
-                    
+
                     x = sample
                     u = current_nominal_action
                     self.simulator.x0 = x
 
                     # propagate dynamics
-                    for t_step in range(partial_horizon-1):
-                        u_applied = current_nominal_action + self.K @ (x.T.reshape(-1,) - current_nominal_state.reshape(-1,))
+                    for t_step in range(partial_horizon - 1):
+                        u_applied = current_nominal_action + self.K @ (
+                            x.T.reshape(
+                                -1,
+                            )
+                            - current_nominal_state.reshape(
+                                -1,
+                            )
+                        )
                         x_next = self.simulator.make_step(u0=u_applied)
-                        builder.add_step(action=u_applied, next_obs=x_next, reward=0.0, info={})
+                        # calculate tracking cost
+                        tracking_cost = self._compute_tracking_cost_metric(
+                            x, u_applied, t + t_step
+                        )
+                        # calculate margin to safety violation
+                        margin_safety = self._compute_margin_safety_violation(x)
+                        builder.add_step(
+                            action=u_applied,
+                            next_obs=x_next,
+                            reward=0.0,
+                            info={
+                                "tracking_cost": tracking_cost,
+                                "margin_safety": margin_safety,
+                            },
+                        )
                         x = x_next
 
-                        current_nominal_state = trajectory.obs[t+t_step]
-                        current_nominal_action = trajectory.obs[t+t_step]
+                        current_nominal_state = trajectory.obs[t + t_step]
+                        current_nominal_action = trajectory.obs[t + t_step]
 
                     # finalize trajectory
                     traj = builder.finish(terminal=True)
 
                     augmented_trajs_t.append(traj)
-            
-                    augmented_infos.append({
-                        "original_timestep": t,
-                        "noise_level": 7,
-                        "augmentation_method": "robust_tube_mpc",
-                    })
-                
+
+                    augmented_infos.append(
+                        {
+                            "original_timestep": t,
+                            "noise_level": 7,
+                            "augmentation_method": "robust_tube_mpc",
+                        }
+                    )
+
                 augmented_trajs.append(augmented_trajs_t)
-        
+
         return augmented_trajs
-    
+
     def _sample_disturbance(self, scale: float = 1.0) -> np.ndarray:
         """Sample a disturbance from the disturbance set.
-        
+
         Args:
             scale: Scaling factor for disturbance magnitude
-            
+
         Returns:
             Sampled disturbance vector
         """
         if self.state_dim is None:
             raise ValueError("State dimension not set")
-        
+
         # Sample from uniform ball with radius = disturbance_bound * scale
         direction = np.random.randn(self.state_dim)
         direction /= np.linalg.norm(direction)
         radius = np.random.uniform(0, self.disturbance_bound * scale)
         return direction * radius
-    
-    def get_tube_statistics(
-        self, 
-        trajectories: List[types.Trajectory],
-    ) -> Dict[str, Any]:
-        """Compute statistics about tube constraints satisfaction.
-        
+
+    def _compute_tracking_cost_metric(
+        self, x: np.ndarray, u: Optional[np.ndarray], k: int
+    ) -> np.float64:
+        """Compute tracking cost metric for individual data point
+
         Args:
-            trajectories: Trajectories to analyze
-            
+            x (np.ndarray): current state
+            u (Optional[np.ndarray]): current input (if not terminal state)
+            k (int): timestep of interest
+
         Returns:
-            Dictionary with tube statistics
+            np.float64: tracking cost J from MPC
         """
-        if not trajectories:
-            return {}
-        
-        deviations = []
-        for traj in trajectories:
-            for t in range(len(traj.obs) - 1):
-                # Compute deviation from nominal trajectory
-                # (This is a simplified version - in practice you'd have a reference)
-                if t > 0:
-                    deviation = np.linalg.norm(traj.obs[t] - traj.obs[t-1])
-                    deviations.append(deviation)
-        
-        if deviations:
-            return {
-                "mean_deviation": np.mean(deviations),
-                "max_deviation": np.max(deviations),
-                "std_deviation": np.std(deviations),
-                "tube_violations": sum(d > self.tube_radius for d in deviations),
-                "violation_rate": sum(d > self.tube_radius for d in deviations) / len(deviations),
-            }
-        else:
-            return {"mean_deviation": 0.0, "max_deviation": 0.0, "std_deviation": 0.0}
-        
-    
-    def _compute_tracking_cost_metric(self, x: np.ndarray, u: Optional[np.ndarray], k: int) -> np.float64:
-
-
         # extract reference solution
         xs = self.xs[k]
         x_difference = x - xs
         if u:
             us = self.us[k]
             u_difference = u - us
-            return x_difference.T @ self.Q @ x_difference + u_difference.T @ self.R @ u_difference
-        
+            return (
+                x_difference.T @ self.Q @ x_difference
+                + u_difference.T @ self.R @ u_difference
+            )
+
         return x_difference.T @ self.Q @ x_difference
 
-def tighten_state_constraints(state_constraint_vertices: List[np.ndarray], A_F: np.ndarray, b_F: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_margin_safety_violation(self, x: np.ndarray) -> np.float64:
+        """Calculate margin to safety violation of a given state relative to tightened state constraints
+
+        Args:
+            x (np.ndarray): state
+
+        Returns:
+            np.float64: margin for that state (higher is better)
+        """
+        if self.state_bounds is None:
+            return 1e6
+
+        # calculate slack for each timestep
+        min_margin = float("inf")
+        for a_row, b_val in zip(self.A_x_t, self.b_x_t):
+            margin = b_val - a_row.T @ x
+            if margin < min_margin:
+                min_margin = margin
+
+        return min_margin
+
+
+def tighten_state_constraints(
+    state_constraint_vertices: List[np.ndarray], A_F: np.ndarray, b_F: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
     """Tightens state constraints using calculated mRPI H-rep
 
     Args:
-        state_constraint_vertices (np.ndarray): list of state constraints of the form: [lower, upper] 
-        A_F (np.ndarray): A-matrix of mRPI H-rep set 
+        state_constraint_vertices (np.ndarray): list of state constraints of the form: [lower, upper]
+        A_F (np.ndarray): A-matrix of mRPI H-rep set
         b_F (np.ndarray): b-vector of mRPI H-rep set
 
     Returns:
-        Tuple[np.ndarray, np.ndarray]: Tuple containing tightened A-matrix and tightened b-vector of state constraints 
+        Tuple[np.ndarray, np.ndarray]: Tuple containing tightened A-matrix and tightened b-vector of state constraints
     """
     A_x, b_x = box_to_Ab(state_constraint_vertices[0], state_constraint_vertices[1])
 
@@ -377,12 +436,18 @@ def tighten_state_constraints(state_constraint_vertices: List[np.ndarray], A_F: 
 
     return A_x_t, b_x_t
 
-def tighten_control_constraints(control_constraint_vertices: np.ndarray, K: np.ndarray, A_F: np.ndarray, b_F: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+
+def tighten_control_constraints(
+    control_constraint_vertices: np.ndarray,
+    K: np.ndarray,
+    A_F: np.ndarray,
+    b_F: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Tightens control constraints using calculated mRPI H-rep
 
     Args:
-        state_constraint_vertices (np.ndarray): list of control constraints of the form: [lower, upper] 
-        A_F (np.ndarray): A-matrix of mRPI H-rep set 
+        state_constraint_vertices (np.ndarray): list of control constraints of the form: [lower, upper]
+        A_F (np.ndarray): A-matrix of mRPI H-rep set
         b_F (np.ndarray): b-vector of mRPI H-rep set
 
     Returns:
@@ -392,6 +457,7 @@ def tighten_control_constraints(control_constraint_vertices: np.ndarray, K: np.n
     A_u_t, b_u_t = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
 
     return A_u_t, b_u_t
+
 
 def get_approximate_tube(Z_polyhedron: pytope.Polytope) -> pytope.Polytope:
     """Generate outer approximation bounding box for tube cross section Z
@@ -410,25 +476,27 @@ def get_approximate_tube(Z_polyhedron: pytope.Polytope) -> pytope.Polytope:
     b_matrix = []
     A_matrix_list = []
 
-
     # Iterate over each dim to extract max and min value, add to b matrix
     n_dim = len(verts[0])
     for dim in range(n_dim):
-        temp = verts[:,dim]
-        tmp_vector = np.zeros((2,n_dim))
-        tmp_vector[:, dim] = np.array([1,-1])
+        temp = verts[:, dim]
+        tmp_vector = np.zeros((2, n_dim))
+        tmp_vector[:, dim] = np.array([1, -1])
         max_points.append(np.max(temp))
         min_points.append(np.min(temp))
         b_matrix.append(np.max(temp))
         b_matrix.append(-np.min(temp))
         A_matrix_list.append(tmp_vector)
-    
-    # form A_matrix 
+
+    # form A_matrix
     A_matrix = np.vstack(A_matrix_list)
 
     return pytope.Polytope(A_matrix, b_matrix)
 
-def get_samples(Z_polyhedron: pytope.Polytope, corners: bool = True) -> List[np.ndarray]:
+
+def get_samples(
+    Z_polyhedron: pytope.Polytope, corners: bool = True
+) -> List[np.ndarray]:
     """Get corner or face-center samples from polyhedron
 
     Args:
@@ -452,11 +520,11 @@ def get_samples(Z_polyhedron: pytope.Polytope, corners: bool = True) -> List[np.
 
         # Iterate over each dimension, extract midpoints
         for dim in range(n_dim):
-            tmp = Z_polyhedron.V[:,dim]
-            midpoints.append((np.max(tmp) - np.min(tmp))/2.0)
+            tmp = Z_polyhedron.V[:, dim]
+            midpoints.append((np.max(tmp) - np.min(tmp)) / 2.0)
             minpoints.append(np.min(tmp))
             maxpoints.append(np.max(tmp))
-        
+
         # Form vertices
         for i_dim in range(n_dim):
             for j_dim in range(n_dim):
@@ -465,15 +533,15 @@ def get_samples(Z_polyhedron: pytope.Polytope, corners: bool = True) -> List[np.
 
                 samples.append(np.array([midpoints[i_dim], minpoints[j_dim]]))
                 samples.append(np.array([midpoints[i_dim], maxpoints[j_dim]]))
-        
-    
+
     return samples
 
+
 def get_vertices(A, b):
-    """ Converts H-rep into a list of vertices """
+    """Converts H-rep into a list of vertices"""
 
     # Form h-matrix and extract generators
-    mat = cdd.Matrix(np.hstack([b.reshape(-1,1), -A]), number_type='float')
+    mat = cdd.Matrix(np.hstack([b.reshape(-1, 1), -A]), number_type="float")
     mat.rep_type = cdd.RepType.INEQUALITY
     poly = cdd.Polyhedron(mat)
     generators = poly.get_generators()
@@ -483,32 +551,35 @@ def get_vertices(A, b):
     for generator in generators:
         if generator[0] == 1:
             vertices.append(generator[1:])
-    
+
     return np.array(vertices, dtype=float)
+
 
 def sample_from_disturbance(W_polyhedron, n_samples=1):
     """Sample uniformly from the disturbance polytope."""
     vertices = W_polyhedron.V
-    
+
     # Method 1: Rejection sampling for small polytopes
     min_coords = np.min(vertices, axis=0)
     max_coords = np.max(vertices, axis=0)
-    
+
     samples = []
     while len(samples) < n_samples:
         candidate = np.random.uniform(min_coords, max_coords)
         if W_polyhedron.contains(candidate):
             samples.append(candidate)
-    
+
     return np.array(samples) if n_samples > 1 else samples[0]
+
 
 def support_function(A, b, d):
     # cdd wants [b | A] with inequalities in form b + A x >= 0
     V = get_vertices(A, b)
 
     d = np.asarray(d)
-    d = np.atleast_2d(d)      # shape (m, n_dirs)
+    d = np.atleast_2d(d)  # shape (m, n_dirs)
     return np.max(V @ d, axis=0)
+
 
 def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
     """
@@ -520,9 +591,10 @@ def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
 
     b_tight = []
     for a, b in zip(A_x, b_x):
-        h = support_function_lp(A_F, b_F, a)   # your routine
+        h = support_function_lp(A_F, b_F, a)  # your routine
         b_tight.append(b - h)
     return np.array(A_x, dtype=float), np.array(b_tight, dtype=float)
+
 
 def tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F):
     """
@@ -533,10 +605,11 @@ def tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F):
     """
     b_tight = []
     for a, b in zip(A_u, b_u):
-        d = K.T @ a.reshape(-1,1)               # map direction
+        d = K.T @ a.reshape(-1, 1)  # map direction
         h = support_function_lp(A_F, b_F, d.flatten())
         b_tight.append(b - h)
     return np.array(A_u, dtype=float), np.array(b_tight, dtype=float)
+
 
 def box_to_Ab(lower, upper):
     """
@@ -555,24 +628,28 @@ def box_to_Ab(lower, upper):
     for i in range(n):
         e_i = np.zeros(n)
         e_i[i] = 1.0
-        A.append(e_i); b.append(upper[i])
-        A.append(-e_i); b.append(-lower[i])
+        A.append(e_i)
+        b.append(upper[i])
+        A.append(-e_i)
+        b.append(-lower[i])
 
     return np.vstack(A), np.array(b)
+
 
 def support_function_lp(A, b, d):
     A = np.asarray(A, dtype=float)
     b = np.asarray(b, dtype=float)
-    h_repr = np.hstack([b.reshape(-1,1)])
+    h_repr = np.hstack([b.reshape(-1, 1)])
 
-    lp_mat = cdd.Matrix(np.hstack([b.reshape(-1,1), -A]), number_type='float')
+    lp_mat = cdd.Matrix(np.hstack([b.reshape(-1, 1), -A]), number_type="float")
     lp_mat.rep_type = cdd.RepType.INEQUALITY
     lp_mat.obj_type = cdd.LPObjType.MAX
     lp_mat.obj_func = (0,) + tuple(d)
     lp = cdd.LinProg(lp_mat)
     lp.solve()
-    
+
     return lp.obj_value
+
 
 def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     """
@@ -583,21 +660,28 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     s, alpha, Ms = 0, 1000, 1000
 
     # Step 1: find s such that alpha small enough
-    while alpha > epsilon/(epsilon + Ms) and s < max_iter:
+    while alpha > epsilon / (epsilon + Ms) and s < max_iter:
         s += 1
         dirs = (np.linalg.matrix_power(Ak, s) @ W_A.T).T
-        alpha = np.max([
-            support_function_lp(W_A, W_b, d) / bi
-            for d, bi in zip(dirs, W_b)
-        ])
+        alpha = np.max(
+            [support_function_lp(W_A, W_b, d) / bi for d, bi in zip(dirs, W_b)]
+        )
 
-        mss = np.zeros((2*nx, 1))
-        for i in range(1, s+1):
-            mss += np.array([support_function(W_A, W_b, np.linalg.matrix_power(Ak, i)).reshape(-1, 1), support_function(W_A, W_b, -np.linalg.matrix_power(Ak, i)).reshape(-1, 1)]).reshape((2*nx, 1))
-        
+        mss = np.zeros((2 * nx, 1))
+        for i in range(1, s + 1):
+            mss += np.array(
+                [
+                    support_function(W_A, W_b, np.linalg.matrix_power(Ak, i)).reshape(
+                        -1, 1
+                    ),
+                    support_function(W_A, W_b, -np.linalg.matrix_power(Ak, i)).reshape(
+                        -1, 1
+                    ),
+                ]
+            ).reshape((2 * nx, 1))
+
         Ms = max(mss)
-        
-        
+
         # # crude Ms bound
         # mss = []
         # for i in range(1, s+1):
@@ -609,10 +693,10 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     # Step 2: build H-rep of F
     A_F = W_A.copy()
     b_F = []
-    Fs = pytope.Polytope(A = W_A, b = W_b)
-    for i in range (1,s):
+    Fs = pytope.Polytope(A=W_A, b=W_b)
+    for i in range(1, s):
         Fs = Fs + np.linalg.matrix_power(Ak, i) * Fs
-    Fs = (1/1-alpha)*Fs
+    Fs = (1 / 1 - alpha) * Fs
     # for a, b in zip(W_A, W_b):
     #     # sum support values in direction (A^k)^T a
     #     s_val = 0.0
