@@ -14,42 +14,42 @@ from scipy.spatial import ConvexHull
 import pytope
 
 
-
-
 def main():
 
     # Set up discrete linear system
-    A = np.array([[1,1],[0,1]])
+    A = np.array([[1, 1], [0, 1]])
     B = np.array([[0.5], [1]])
-    Q = np.diag([1,1])
+    Q = np.diag([1, 1])
     R = 0.1
 
     P = solve_discrete_are(A, B, Q, R)
     K = -np.linalg.inv(B.T @ P @ B + R) @ (B.T @ P @ A)  # LQR gain
 
     # closed loop
-    Ak = A + B@K
+    Ak = A + B @ K
 
     # Set up disturbance with cdd
-    W_vertex = np.array([[0.15, 0.15],[0.15, -0.15],[-0.15,-0.15],[-0.15,0.15]], dtype=object)
+    W_vertex = np.array(
+        [[0.15, 0.15], [0.15, -0.15], [-0.15, -0.15], [-0.15, 0.15]], dtype=object
+    )
     W_polytope = pytope.Polytope(W_vertex)
     gen_mat = cdd.Matrix(
         np.hstack([np.ones((W_vertex.shape[0], 1), dtype=object), W_vertex]).tolist(),
-        number_type='float'
+        number_type="float",
     )
     gen_mat.rep_type = cdd.RepType.GENERATOR
 
     W = cdd.Polyhedron(gen_mat)
-    W_polyhedron = Polyhedron(V = W_vertex)
+    W_polyhedron = Polyhedron(V=W_vertex)
 
     # Convert to H-rep (Ax <= b)
     H = W.get_inequalities()
     H_mat = np.array([list(row) for row in H], dtype=float)
-    W_b, W_A = H_mat[:,0], -H_mat[:,1:]
+    W_b, W_A = H_mat[:, 0], -H_mat[:, 1:]
 
     A_x, b_x = box_to_Ab(np.array([[-10.0], [-2.0]]), np.array([[2.0], [2.0]]))
     A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
-    
+
     # Compute mrpi set
     A_F, b_F = compute_mrpi_hrep(Ak, W_polytope.A, W_polytope.b)
 
@@ -58,54 +58,51 @@ def main():
     A_u_t, b_u_t = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
 
     # compute robust MPI set
-    Xc_robust = pytope.Polytope(A = A_x_t, b = b_x_t)
-    Uc_robust = pytope.Polytope(A = A_u_t, b = b_u_t)
+    Xc_robust = pytope.Polytope(A=A_x_t, b=b_x_t)
+    Uc_robust = pytope.Polytope(A=A_u_t, b=b_u_t)
 
     # Xmpi_robust = compute_MPI_set(Ak, K, Xc_robust, Uc_robust)
 
-
     # Set up discrete disturbed linear system
-    model_type = 'discrete'
+    model_type = "discrete"
     model = do_mpc.model.Model(model_type)
 
-    _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
-    _u = model.set_variable(var_type='_u', var_name='u', shape=(1,1))
+    _x = model.set_variable(var_type="_x", var_name="x", shape=(2, 1))
+    _u = model.set_variable(var_type="_u", var_name="u", shape=(1, 1))
 
-    x_next = A@_x + B@_u # linear system without disturbance
+    x_next = A @ _x + B @ _u  # linear system without disturbance
 
-    model.set_rhs('x', x_next)
-
+    model.set_rhs("x", x_next)
 
     model.setup()
 
     # Controller
     mpc = do_mpc.controller.MPC(model)
-    setup_mpc = {'n_robust': 0,
-                 'n_horizon': 10,
-                 't_step': 0.1,
-                 'state_discretization': 'discrete',
-                 'store_full_solution': True
+    setup_mpc = {
+        "n_robust": 0,
+        "n_horizon": 10,
+        "t_step": 0.1,
+        "state_discretization": "discrete",
+        "store_full_solution": True,
     }
 
-
     # lower bounds of the states
-    mpc.bounds['lower','_x','x'] = np.array([-b_x_t[1], -b_x_t[3]])
+    mpc.bounds["lower", "_x", "x"] = np.array([-b_x_t[1], -b_x_t[3]])
 
     # upper bounds of the states
-    mpc.bounds['upper','_x','x'] = np.array([b_x_t[0], b_x_t[2]])
+    mpc.bounds["upper", "_x", "x"] = np.array([b_x_t[0], b_x_t[2]])
 
     # lower bounds of the input
-    mpc.bounds['lower','_u','u'] = -np.array([b_u_t[0]])
+    mpc.bounds["lower", "_u", "u"] = -np.array([b_u_t[0]])
 
     # upper bounds of the input
-    mpc.bounds['upper','_u','u'] =  np.array([b_u_t[1]])
-    
+    mpc.bounds["upper", "_u", "u"] = np.array([b_u_t[1]])
+
     mpc.set_param(**setup_mpc)
-    
 
     # Objective
-    x = model.x['x']
-    u = model.u['u']
+    x = model.x["x"]
+    u = model.u["u"]
     # Enforce: x_lower <= x <= x_upper,  u_lower <= u <= u_upper
 
     # # State constraints: A_x_t x <= b_x_t  (constant)
@@ -118,40 +115,37 @@ def main():
     #     a_j = ca.DM(A_u_t[j]).T     # (1 x n_u)
     #     mpc.set_nl_cons(f'U_{j}', a_j @ model.u['u'], ub=float(b_u_t[j]))
 
-
-
-    lterm = (x.T @ Q @ x)
+    lterm = x.T @ Q @ x
     mterm = x.T @ P @ x
 
     mpc.settings.set_linear_solver()
     mpc.set_objective(mterm=mterm, lterm=lterm)
     mpc.set_rterm(ca.SX(R))
-    
 
     mpc.setup()
 
     # Generate the simulation model, which is a copy of the mpc model but with an added disturbance.
     dist_model = do_mpc.model.Model(model_type)
 
-    _x = dist_model.set_variable(var_type='_x', var_name='x', shape=(2,1))
-    _u = dist_model.set_variable(var_type='_u', var_name='u', shape=(1,1))
+    _x = dist_model.set_variable(var_type="_x", var_name="x", shape=(2, 1))
+    _u = dist_model.set_variable(var_type="_u", var_name="u", shape=(1, 1))
 
     # Set disturbance
-    _d = dist_model.set_variable(var_type='_p', var_name='d', shape=(2,1)) 
+    _d = dist_model.set_variable(var_type="_p", var_name="d", shape=(2, 1))
 
-    x_dist_next = A@_x + B@_u + _d
+    x_dist_next = A @ _x + B @ _u + _d
 
-    dist_model.set_rhs('x', x_dist_next)
+    dist_model.set_rhs("x", x_dist_next)
     dist_model.setup()
 
     simulator = do_mpc.simulator.Simulator(dist_model)
 
     d_template = simulator.get_p_template()
-    
+
     def d_fun(t_now):
-        d_template['d'] = sample_from_disturbance(W_polytope)
+        d_template["d"] = sample_from_disturbance(W_polytope)
         return d_template
-    
+
     simulator.set_p_fun(d_fun)
 
     simulator.set_param(t_step=0.1)
@@ -161,7 +155,7 @@ def main():
     np.random.seed(99)
 
     # Initial state
-    e = np.ones([model.n_x,1])
+    e = np.ones([model.n_x, 1])
     x0 = np.array([-7, -2])
     mpc.x0 = x0
     simulator.x0 = x0
@@ -169,32 +163,39 @@ def main():
     # Use initial state to set the initial guess.
     mpc.set_initial_guess()
 
-    
     for k in range(50):
         u0 = mpc.make_step(x0)
-        x_nom0 = mpc.data.prediction(('_x', 'x'))[:,0]
-        print("Predicted trajectory: ", mpc.data.prediction(('_x', 'x')))
-        u_applied = u0 + K @ (x0.T.reshape(-1,) - x_nom0.reshape(-1,))
+        x_nom0 = mpc.data.prediction(("_x", "x"))[:, 0]
+        print("Predicted trajectory: ", mpc.data.prediction(("_x", "x")))
+        u_applied = u0 + K @ (
+            x0.T.reshape(
+                -1,
+            )
+            - x_nom0.reshape(
+                -1,
+            )
+        )
         y_next = simulator.make_step(u_applied)
         x0 = y_next
 
-    X_pred = mpc.data.prediction(('_x', 'x'))  # shape (n_x, horizon+1)
-    U_pred = mpc.data.prediction(('_u', 'u'))
+    X_pred = mpc.data.prediction(("_x", "x"))  # shape (n_x, horizon+1)
+    U_pred = mpc.data.prediction(("_u", "u"))
 
     # print("Min state constraint margin:", np.min(b_x_t - (A_x_t @ X_pred)))
     # print("Min input constraint margin:", np.min(b_u_t - (A_u_t @ U_pred)))
 
-
     from matplotlib import rcParams
-    rcParams['axes.grid'] = True
-    rcParams['font.size'] = 18
+
+    rcParams["axes.grid"] = True
+    rcParams["font.size"] = 18
 
     import matplotlib.pyplot as plt
-    fig, ax, graphics = do_mpc.graphics.default_plot(mpc.data, figsize=(16,9))
+
+    fig, ax, graphics = do_mpc.graphics.default_plot(mpc.data, figsize=(16, 9))
     graphics.plot_results()
 
-    ub = mpc.bounds['upper', '_x', 'x']  # e.g. array([ub_0, ub_1, ...])
-    lb = mpc.bounds['lower', '_x', 'x']
+    ub = mpc.bounds["upper", "_x", "x"]  # e.g. array([ub_0, ub_1, ...])
+    lb = mpc.bounds["lower", "_x", "x"]
 
     # normalize axes to a 1D list
     ax_list = np.ravel(ax) if isinstance(ax, np.ndarray) else [ax]
@@ -203,28 +204,20 @@ def main():
         if i < len(ax_list):
             color = ax_list[0].get_lines()
             color = color[i].get_color()
-            ax_list[0].axhline(y=float(u), color=color, linestyle='--', linewidth=1)
-            ax_list[0].axhline(y=float(l), color=color, linestyle='--', linewidth=1)
-    
-    uub = mpc.bounds['upper', '_u', 'u']
-    ulb = mpc.bounds['lower', '_u', 'u']
+            ax_list[0].axhline(y=float(u), color=color, linestyle="--", linewidth=1)
+            ax_list[0].axhline(y=float(l), color=color, linestyle="--", linewidth=1)
+
+    uub = mpc.bounds["upper", "_u", "u"]
+    ulb = mpc.bounds["lower", "_u", "u"]
 
     color = ax_list[0].get_lines()
     color = color[0].get_color()
-    ax_list[1].axhline(y=float(uub), color = color, linestyle='--', linewidth=1)
-    ax_list[1].axhline(y=float(ulb), color = color, linestyle='--', linewidth=1)
-
-
+    ax_list[1].axhline(y=float(uub), color=color, linestyle="--", linewidth=1)
+    ax_list[1].axhline(y=float(ulb), color=color, linestyle="--", linewidth=1)
 
     graphics.reset_axes()
     plt.show()
 
-
-
-
-
-
-    
     return None
 
 
@@ -234,8 +227,7 @@ class Polyhedron:
             # V-representation: convex hull of vertices
             V = np.asarray(V, dtype=float)
             gen_mat = cdd.Matrix(
-                np.hstack([np.ones((V.shape[0], 1)), V]).tolist(),
-                number_type="float"
+                np.hstack([np.ones((V.shape[0], 1)), V]).tolist(), number_type="float"
             )
             gen_mat.rep_type = cdd.RepType.GENERATOR
             self._poly = cdd.Polyhedron(gen_mat)
@@ -249,7 +241,7 @@ class Polyhedron:
 
         else:
             raise ValueError("Must provide either (A,b) or V")
-    
+
     # --- API methods ---
     def contains(self, x, tol=1e-9):
         """Check if point x is inside polyhedron."""
@@ -273,45 +265,48 @@ class Polyhedron:
         b = H_np[:, 0]
         A = -H_np[:, 1:]
         return A, b
-    
+
 
 def sample_from_disturbance(W_polyhedron, n_samples=1):
     """Sample uniformly from the disturbance polytope."""
     vertices = W_polyhedron.V
-    
+
     # Method 1: Rejection sampling for small polytopes
     min_coords = np.min(vertices, axis=0)
     max_coords = np.max(vertices, axis=0)
-    
+
     samples = []
     while len(samples) < n_samples:
         candidate = np.random.uniform(min_coords, max_coords)
         if W_polyhedron.contains(candidate):
             samples.append(candidate)
-    
+
     return np.array(samples) if n_samples > 1 else samples[0]
+
 
 def support_function(A, b, d):
     # cdd wants [b | A] with inequalities in form b + A x >= 0
     V = get_vertices(A, b)
 
     d = np.asarray(d)
-    d = np.atleast_2d(d)      # shape (m, n_dirs)
+    d = np.atleast_2d(d)  # shape (m, n_dirs)
     return np.max(V @ d, axis=0)
+
 
 def support_function_lp(A, b, d):
     A = np.asarray(A, dtype=float)
     b = np.asarray(b, dtype=float)
-    h_repr = np.hstack([b.reshape(-1,1)])
+    h_repr = np.hstack([b.reshape(-1, 1)])
 
-    lp_mat = cdd.Matrix(np.hstack([b.reshape(-1,1), -A]), number_type='float')
+    lp_mat = cdd.Matrix(np.hstack([b.reshape(-1, 1), -A]), number_type="float")
     lp_mat.rep_type = cdd.RepType.INEQUALITY
     lp_mat.obj_type = cdd.LPObjType.MAX
     lp_mat.obj_func = (0,) + tuple(d)
     lp = cdd.LinProg(lp_mat)
     lp.solve()
-    
+
     return lp.obj_value
+
 
 def minkowski_sum(V1, V2):
     """
@@ -322,14 +317,15 @@ def minkowski_sum(V1, V2):
     V_sum = np.array([v1 + v2 for v1 in V1 for v2 in V2])
     # Convex hull via cdd
     mat = cdd.Matrix(
-        np.hstack([np.ones((V_sum.shape[0],1)), V_sum]).tolist(),
-        number_type="fraction"
+        np.hstack([np.ones((V_sum.shape[0], 1)), V_sum]).tolist(),
+        number_type="fraction",
     )
     mat.rep_type = cdd.RepType.GENERATOR
     P = cdd.Polyhedron(mat)
     verts = P.get_generators()
 
     return np.array([row[1:] for row in verts if row[0] == 1], dtype=float)
+
 
 def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
     """
@@ -340,9 +336,10 @@ def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
 
     b_tight = []
     for a, b in zip(A_x, b_x):
-        h = support_function_lp(A_F, b_F, a)   # your routine
+        h = support_function_lp(A_F, b_F, a)  # your routine
         b_tight.append(b - h)
     return np.array(A_x, dtype=float), np.array(b_tight, dtype=float)
+
 
 def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     """
@@ -353,21 +350,28 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     s, alpha, Ms = 0, 1000, 1000
 
     # Step 1: find s such that alpha small enough
-    while alpha > epsilon/(epsilon + Ms) and s < max_iter:
+    while alpha > epsilon / (epsilon + Ms) and s < max_iter:
         s += 1
         dirs = (np.linalg.matrix_power(Ak, s) @ W_A.T).T
-        alpha = np.max([
-            support_function_lp(W_A, W_b, d) / bi
-            for d, bi in zip(dirs, W_b)
-        ])
+        alpha = np.max(
+            [support_function_lp(W_A, W_b, d) / bi for d, bi in zip(dirs, W_b)]
+        )
 
-        mss = np.zeros((2*nx, 1))
-        for i in range(1, s+1):
-            mss += np.array([support_function(W_A, W_b, np.linalg.matrix_power(Ak, i)).reshape(-1, 1), support_function(W_A, W_b, -np.linalg.matrix_power(Ak, i)).reshape(-1, 1)]).reshape((2*nx, 1))
-        
+        mss = np.zeros((2 * nx, 1))
+        for i in range(1, s + 1):
+            mss += np.array(
+                [
+                    support_function(W_A, W_b, np.linalg.matrix_power(Ak, i)).reshape(
+                        -1, 1
+                    ),
+                    support_function(W_A, W_b, -np.linalg.matrix_power(Ak, i)).reshape(
+                        -1, 1
+                    ),
+                ]
+            ).reshape((2 * nx, 1))
+
         Ms = max(mss)
-        
-        
+
         # # crude Ms bound
         # mss = []
         # for i in range(1, s+1):
@@ -379,10 +383,10 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     # Step 2: build H-rep of F
     A_F = W_A.copy()
     b_F = []
-    Fs = pytope.Polytope(A = W_A, b = W_b)
-    for i in range (1,s):
+    Fs = pytope.Polytope(A=W_A, b=W_b)
+    for i in range(1, s):
         Fs = Fs + np.linalg.matrix_power(Ak, i) * Fs
-    Fs = (1/1-alpha)*Fs
+    Fs = (1 / 1 - alpha) * Fs
     # for a, b in zip(W_A, W_b):
     #     # sum support values in direction (A^k)^T a
     #     s_val = 0.0
@@ -397,12 +401,16 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
 
     return A_F, b_F
 
+
 def compute_MPI_set(Ak, K, X, U):
     F, G, nc = convert_Poly2Mat(X, U)
+
     def Fpi(i):
         return (F + G @ K) @ np.linalg.matrix_power(Ak, i)
-    def Xpi(i): 
-        return pytope.Polytope(A = Fpi(i), b = np.ones((Fpi(i).shape[0], 1)))
+
+    def Xpi(i):
+        return pytope.Polytope(A=Fpi(i), b=np.ones((Fpi(i).shape[0], 1)))
+
     Xmpi = Xpi(0)
     i = 0
     while 1:
@@ -414,8 +422,8 @@ def compute_MPI_set(Ak, K, X, U):
         else:
             Xmpi = Xmpi_tmp
 
-
     return Xmpi
+
 
 def convert_Poly2Mat(X, U):
     """convert Polyhedron to matrix of inequalities
@@ -427,26 +435,24 @@ def convert_Poly2Mat(X, U):
 
     # extract inequality matrix for X
     def poly2ineq_norm(poly):
-        return poly.A/np.tile(poly.b, (1, np.shape(poly.A)[1]))
-    
+        return poly.A / np.tile(poly.b, (1, np.shape(poly.A)[1]))
+
     F_tmp = poly2ineq_norm(X)
     G_tmp = poly2ineq_norm(U)
-    
+
     X_dim = np.linalg.matrix_rank(X.V - X.V[0])
     U_dim = np.linalg.matrix_rank(U.V - U.V[0])
     # check for empty matrices
     if np.prod(np.shape(F_tmp)) == 0:
-        F_tmp = np.empty((0,X_dim))
+        F_tmp = np.empty((0, X_dim))
     if np.prod(np.shape(G_tmp)) == 0:
-        G_tmp = np.empty((0,U_dim))
+        G_tmp = np.empty((0, U_dim))
 
     F = np.vstack([F_tmp, np.zeros((G_tmp.shape[0], X_dim))])
     G = np.vstack([np.zeros((F_tmp.shape[0], U_dim)), G_tmp])
     nc = np.shape(F)[0]
 
-
     return F, G, nc
-
 
 
 def tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F):
@@ -458,13 +464,14 @@ def tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F):
     """
     b_tight = []
     for a, b in zip(A_u, b_u):
-        d = K.T @ a.reshape(-1,1)               # map direction
+        d = K.T @ a.reshape(-1, 1)  # map direction
         h = support_function_lp(A_F, b_F, d.flatten())
         b_tight.append(b - h)
     return np.array(A_u, dtype=float), np.array(b_tight, dtype=float)
 
+
 def tighten_by_linear_image_Vrep(A_u, b_u, K, A_F, b_F):
-    """ 
+    """
     Tighten input constraints U ⊖ K F in V-rep.
     A_u, b_u : original input constraints
     K        : feedback gain matrix
@@ -479,13 +486,14 @@ def tighten_by_linear_image_Vrep(A_u, b_u, K, A_F, b_F):
     Fc = Fc @ np.diag(K)
 
     # Since axis aligned...?
-    # Uc_robust = 
+    # Uc_robust =
+
 
 def get_vertices(A, b):
-    """ Converts H-rep into a list of vertices """
+    """Converts H-rep into a list of vertices"""
 
     # Form h-matrix and extract generators
-    mat = cdd.Matrix(np.hstack([b.reshape(-1,1), -A]), number_type='float')
+    mat = cdd.Matrix(np.hstack([b.reshape(-1, 1), -A]), number_type="float")
     mat.rep_type = cdd.RepType.INEQUALITY
     poly = cdd.Polyhedron(mat)
     generators = poly.get_generators()
@@ -495,9 +503,8 @@ def get_vertices(A, b):
     for generator in generators:
         if generator[0] == 1:
             vertices.append(generator[1:])
-    
-    return np.array(vertices, dtype=float)
 
+    return np.array(vertices, dtype=float)
 
 
 def box_to_Ab(lower, upper):
@@ -517,11 +524,12 @@ def box_to_Ab(lower, upper):
     for i in range(n):
         e_i = np.zeros(n)
         e_i[i] = 1.0
-        A.append(e_i); b.append(upper[i])
-        A.append(-e_i); b.append(-lower[i])
+        A.append(e_i)
+        b.append(upper[i])
+        A.append(-e_i)
+        b.append(-lower[i])
 
     return np.vstack(A), np.array(b)
-
 
 
 if __name__ == "__main__":

@@ -12,9 +12,15 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 import torch
 
 from imitation.data import rollout
-from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector, NoisyPolicy
+from imitation.scripts.NTRIL.noise_injection import (
+    EpsilonGreedyNoiseInjector,
+    NoisyPolicy,
+)
 from imitation.scripts.NTRIL.ntril import NTRILTrainer
-from imitation.scripts.NTRIL.utils import visualize_noise_levels, analyze_ranking_quality
+from imitation.scripts.NTRIL.utils import (
+    visualize_noise_levels,
+    analyze_ranking_quality,
+)
 from imitation.scripts.NTRIL.demonstration_ranked_irl import RankedTransitionsDataset
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.util import logger, util
@@ -26,12 +32,14 @@ from imitation.algorithms.bc import BC
 
 
 def main():
-    """ Build dataset of ranked demonstration data"""
+    """Build dataset of ranked demonstration data"""
 
     # Import sample trajectories
     """Load BC policy"""
-    policy_path = "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/BC_policy"
-    bc_policy = bc.reconstruct_policy(policy_path, device="cuda")
+    policy_path = (
+        "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/BC_policy"
+    )
+    bc_policy = bc.reconstruct_policy(policy_path, device="mps")
 
     """Noise Injector"""
     epsilon = 0.5
@@ -42,10 +50,14 @@ def main():
 
     """Generate environment"""
     rngs = np.random.default_rng()
-    
+
     # Setup environment
-    venv = util.make_vec_env("MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
-    
+    venv = util.make_vec_env(
+        "MountainCarContinuous-v0",
+        rng=rngs,
+        post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
+    )
+
     # Generate expert demonstrations
     print("Generating expert demonstrations...")
     expert_trajectories = rollout.rollout(
@@ -54,7 +66,7 @@ def main():
         rollout.make_sample_until(min_episodes=10),
         rng=rngs,
         exclude_infos=False,
-        label_info={'noise_level': epsilon},
+        label_info={"noise_level": epsilon},
     )
     epsilon = 0.1
     injector = EpsilonGreedyNoiseInjector()
@@ -67,20 +79,22 @@ def main():
         rollout.make_sample_until(min_episodes=10),
         rng=rngs,
         exclude_infos=False,
-        label_info={'noise_level': epsilon},
+        label_info={"noise_level": epsilon},
     )
 
     # Setup ranking dictionary
-    test_dataset = RankedTransitionsDataset([expert_trajectories, expert_trajectories_additional])
-    
-
+    test_dataset = RankedTransitionsDataset(
+        [expert_trajectories, expert_trajectories_additional]
+    )
 
     print(len(test_dataset.demonstrations))
 
     training_data = test_dataset.training_data
 
     ## Store trajectories
-    save_path_traj = "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/trajectories"
+    save_path_traj = (
+        "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/trajectories"
+    )
     serialize.save(save_path_traj, test_dataset.demonstrations)
 
     ## Store training data
@@ -89,25 +103,19 @@ def main():
     for i in range(len(test_dataset)):
         sample = test_dataset[i]
         training_samples.append(sample)
-    
-    torch.save({'samples': training_samples, 
-                'num_snippets': test_dataset.num_snippets,
-                'min_segment_length': test_dataset.min_segment_length,
-                'max_segment_length': test_dataset.max_segment_length,
-                }, save_path_data)
 
+    torch.save(
+        {
+            "samples": training_samples,
+            "num_snippets": test_dataset.num_snippets,
+            "min_segment_length": test_dataset.min_segment_length,
+            "max_segment_length": test_dataset.max_segment_length,
+        },
+        save_path_data,
+    )
 
     return None
 
 
-
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
-
-
-
-
-    
-
-
-    

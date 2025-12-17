@@ -455,7 +455,8 @@ class BasicRewardNet(RewardNet):
         assert outputs.shape == state.shape[:1]
 
         return outputs
-        
+
+
 class TrajectoryRewardNet(BasicRewardNet):
 
     def __init__(
@@ -468,8 +469,8 @@ class TrajectoryRewardNet(BasicRewardNet):
         use_done: bool = False,
         hid_sizes: Sequence[int] = (256, 256),
         **kwargs,
-    ): 
-        
+    ):
+
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
@@ -478,7 +479,7 @@ class TrajectoryRewardNet(BasicRewardNet):
             use_next_state=use_next_state,
             use_done=use_done,
             hid_sizes=hid_sizes,
-            **kwargs,            
+            **kwargs,
         )
 
     def _cumulative_reward(self, traj: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
@@ -489,14 +490,14 @@ class TrajectoryRewardNet(BasicRewardNet):
 
         Returns:
             sum_rewards (th.Tensor): Cumulative sum of rewards across trajectory
-            sum_abs_rewards (th.Tensor): Cumulative absolute sum of rewards across trajectory 
+            sum_abs_rewards (th.Tensor): Cumulative absolute sum of rewards across trajectory
         """
         sum_rewards = 0
         sum_abs_rewards = 0
 
         # Input: trajectory of states with shape (1 x n_segment x 2)
         # x = traj.flatten(start_dim=0, end_dim=1)
-        x = BasicRewardNet.forward(self,traj)
+        x = BasicRewardNet.forward(self, traj)
 
         sum_rewards += th.sum(x)
         sum_abs_rewards += th.sum(th.abs(x))
@@ -507,7 +508,11 @@ class TrajectoryRewardNet(BasicRewardNet):
 
         cum_r_i, abs_r_i = self._cumulative_reward(traj_i)
         cum_r_j, abs_r_j = self._cumulative_reward(traj_j)
-        return th.cat((cum_r_i.unsqueeze(0), cum_r_j.unsqueeze(0)),0), abs_r_i + abs_r_j
+        return (
+            th.cat((cum_r_i.unsqueeze(0), cum_r_j.unsqueeze(0)), 0),
+            abs_r_i + abs_r_j,
+        )
+
 
 class CnnRewardNet(RewardNet):
     """CNN that takes as input the state, action, next state and done flag.

@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 class NTRILTrainer(base.BaseImitationAlgorithm):
     """Noisy Trajectory Ranked Imitation Learning trainer.
-    
+
     This class implements the complete NTRIL pipeline:
     1. Train BC policy on demonstrations
     2. Generate noisy rollouts with varying noise levels
@@ -57,7 +57,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         **kwargs,
     ):
         """Initialize NTRIL trainer.
-        
+
         Args:
             demonstrations: Expert demonstration trajectories
             venv: Vectorized environment for rollout collection
@@ -75,23 +75,25 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             **kwargs: Additional arguments passed to base class
         """
         super().__init__(custom_logger=custom_logger, **kwargs)
-        
+
         self.demonstrations = demonstrations
         self.venv = venv
         self.policy = policy
         self.noise_levels = noise_levels
         self.n_rollouts_per_noise = n_rollouts_per_noise
-        
+
         if th.cuda.is_available():
             self.device = th.device("cuda:0")
         else:
-            self.device = th.device("cpu")
+            self.device = th.device("mps")
 
         if save_dir is None:
-            self.save_dir = os.path.join(os.getcwd(), "ntril_runs", datetime.now().strftime("%Y%m%d-%H%M%S"))
+            self.save_dir = os.path.join(
+                os.getcwd(), "ntril_runs", datetime.now().strftime("%Y%m%d-%H%M%S")
+            )
         else:
             self.save_dir = save_dir
-        
+
         # Initialize components
         self.noise_injector = NoiseInjector()
         self.robust_mpc = RobustTubeMPC(
@@ -99,7 +101,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             disturbance_bound=disturbance_bound,
         )
         self.dataset_builder = RankedDatasetBuilder()
-        
+
         # BC trainer
         self.bc_trainer = bc.BC(
             observation_space=venv.observation_space,
@@ -107,18 +109,18 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             policy=policy,
             demonstrations=demonstrations,
             batch_size=bc_batch_size,
-            device = self.device,
+            device=self.device,
             custom_logger=self._logger,
             **(bc_train_kwargs or {}),
         )
-        
+
         # Reward network and IRL
         if reward_net is None:
             reward_net = reward_nets.BasicRewardNet(
                 venv.observation_space,
                 venv.action_space,
             )
-        
+
         self.irl_trainer = DemonstrationRankedIRL(
             reward_net=reward_net,
             venv=venv,
@@ -126,7 +128,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             lr=irl_lr,
             custom_logger=self._logger,
         )
-        
+
         # Storage for intermediate results
         self.bc_policy: Optional[policies.BasePolicy] = None
         self.noisy_rollouts: List[List[types.Trajectory]] = []
@@ -142,57 +144,57 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         rl_train_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run the complete NTRIL training pipeline.
-        
+
         Args:
             total_timesteps: Total timesteps for final RL training
             bc_train_kwargs: Additional kwargs for BC training
-            irl_train_kwargs: Additional kwargs for IRL training  
+            irl_train_kwargs: Additional kwargs for IRL training
             rl_train_kwargs: Additional kwargs for RL training
-            
+
         Returns:
             Dictionary containing training statistics
         """
         stats = {}
-        
+
         # Step 1: Train BC policy
         self._logger.log("Starting behavioral cloning training...")
         bc_stats = self._train_bc_policy(**(bc_train_kwargs or {}))
         stats["bc"] = bc_stats
-        
+
         # Step 2: Generate noisy rollouts
         self._logger.log("Generating noisy rollouts...")
         rollout_stats = self._generate_noisy_rollouts()
         stats["rollouts"] = rollout_stats
-        
+
         # Step 3: Apply robust tube MPC and augment data
         self._logger.log("Applying robust tube MPC and augmenting data...")
         augmentation_stats = self._augment_data_with_mpc()
         stats["augmentation"] = augmentation_stats
-        
+
         # Step 4: Build ranked dataset
         self._logger.log("Building ranked dataset...")
         ranking_stats = self._build_ranked_dataset()
         stats["ranking"] = ranking_stats
-        
+
         # Step 5: Train reward network using demonstration ranked IRL
         self._logger.log("Training reward network with demonstration ranked IRL...")
         irl_stats = self._train_reward_network(**(irl_train_kwargs or {}))
         stats["irl"] = irl_stats
-        
+
         # Step 6: Train final policy using RL
         self._logger.log("Training final policy using RL...")
         rl_stats = self._train_final_policy(total_timesteps, **(rl_train_kwargs or {}))
         stats["rl"] = rl_stats
-        
+
         return stats
 
     def _train_bc_policy(self, **kwargs) -> Dict[str, Any]:
         """Train the initial BC policy."""
         self.save_bc_policy_dir = os.path.join(self.save_dir, "BC_policy")
-        
+
         self.bc_trainer.train(**kwargs)
         self.bc_policy = self.bc_trainer.policy
-        
+
         util.save_policy(self.bc_policy, self.save_bc_policy_dir)
 
         # Evaluate BC policy
@@ -201,7 +203,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             self.venv,
             rollout.make_sample_until(min_timesteps=1000),
         )
-        
+
         return {
             "n_rollouts": len(bc_rollouts),
             "mean_return": np.mean([sum(traj.rews) for traj in bc_rollouts]),
@@ -211,18 +213,19 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     def _generate_noisy_rollouts(self) -> Dict[str, Any]:
         """Generate rollouts with different noise levels."""
         if self.bc_policy is None:
-            raise ValueError("BC policy must be trained/loaded before generating noisy rollouts")
-        
+            raise ValueError(
+                "BC policy must be trained/loaded before generating noisy rollouts"
+            )
+
         self.noisy_rollouts = []
         total_rollouts = 0
-        
+
         for noise_level in self.noise_levels:
             # Create noisy policy
             noisy_policy = self.noise_injector.inject_noise(
-                self.bc_policy, 
-                noise_level=noise_level
+                self.bc_policy, noise_level=noise_level
             )
-            
+
             # Collect rollouts
             rollouts = rollout.rollout(
                 noisy_policy,
@@ -232,14 +235,14 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                     min_timesteps=None,
                 ),
             )
-            
+
             self.noisy_rollouts.append(rollouts)
             total_rollouts += len(rollouts)
-            
+
             self._logger.log(
                 f"Collected {len(rollouts)} rollouts with noise level {noise_level}"
             )
-        
+
         return {
             "total_rollouts": total_rollouts,
             "noise_levels": list(self.noise_levels),
@@ -250,22 +253,22 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         """Apply robust tube MPC to augment the noisy rollouts."""
         self.augmented_data = []
         total_augmented_transitions = 0
-        
+
         for noise_idx, rollouts in enumerate(self.noisy_rollouts):
             noise_level = self.noise_levels[noise_idx]
-            
+
             for traj in rollouts:
                 # Apply robust tube MPC to each trajectory
                 augmented_transitions = self.robust_mpc.augment_trajectory(
-                    traj, 
-                    noise_level=noise_level
+                    traj, noise_level=noise_level
                 )
                 self.augmented_data.append(augmented_transitions)
                 total_augmented_transitions += len(augmented_transitions.obs)
-        
+
         return {
             "total_augmented_transitions": total_augmented_transitions,
-            "augmentation_ratio": total_augmented_transitions / sum(
+            "augmentation_ratio": total_augmented_transitions
+            / sum(
                 len(rollouts) * np.mean([len(traj) for traj in rollouts])
                 for rollouts in self.noisy_rollouts
             ),
@@ -276,43 +279,49 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         # Combine all augmented data with noise level rankings
         noise_rankings = []
         all_transitions = []
-        
+
         for noise_idx, transitions in enumerate(self.augmented_data):
             noise_level = self.noise_levels[noise_idx % len(self.noise_levels)]
             all_transitions.append(transitions)
             noise_rankings.extend([noise_level] * len(transitions.obs))
-        
+
         # Build ranked dataset
         self.ranked_dataset = self.dataset_builder.build_ranked_dataset(
             all_transitions,
             noise_rankings,
         )
-        
+
         return {
             "total_ranked_transitions": len(self.ranked_dataset.obs),
             "unique_noise_levels": len(set(noise_rankings)),
-            "ranking_distribution": dict(zip(*np.unique(noise_rankings, return_counts=True))),
+            "ranking_distribution": dict(
+                zip(*np.unique(noise_rankings, return_counts=True))
+            ),
         }
 
     def _train_reward_network(self, **kwargs) -> Dict[str, Any]:
         """Train reward network using demonstration ranked IRL."""
         if self.ranked_dataset is None:
-            raise ValueError("Ranked dataset must be built before training reward network")
-        
+            raise ValueError(
+                "Ranked dataset must be built before training reward network"
+            )
+
         irl_stats = self.irl_trainer.train(
             demonstrations=self.demonstrations,
             ranked_dataset=self.ranked_dataset,
-            **kwargs
+            **kwargs,
         )
-        
+
         self.learned_reward_net = self.irl_trainer.reward_net
         return irl_stats
 
     def _train_final_policy(self, total_timesteps: int, **kwargs) -> Dict[str, Any]:
         """Train final policy using RL with learned reward."""
         if self.learned_reward_net is None:
-            raise ValueError("Reward network must be trained before training final policy")
-        
+            raise ValueError(
+                "Reward network must be trained before training final policy"
+            )
+
         # This would integrate with existing RL training infrastructure
         # For now, return placeholder stats
         return {
