@@ -1,5 +1,6 @@
 """Code for testing and debugging NTRIL. Step 4: Build ranked dataset."""
 
+import pathlib
 import numpy as np
 import os
 import seals
@@ -36,10 +37,11 @@ def main():
 
     # Import sample trajectories
     """Load BC policy"""
-    policy_path = (
-        "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/BC_policy"
-    )
-    bc_policy = bc.reconstruct_policy(policy_path, device="mps")
+    # Get the directory where this script is located
+    device = "mps"
+    SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+    policy_path = SCRIPT_DIR / "BC_policy"
+    bc_policy = bc.reconstruct_policy(policy_path, device=device)
 
     """Noise Injector"""
     epsilon = 0.5
@@ -53,7 +55,7 @@ def main():
 
     # Setup environment
     venv = util.make_vec_env(
-        "MountainCarContinuous-v0",
+        "seals/MountainCar-v0",
         rng=rngs,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
     )
@@ -63,7 +65,7 @@ def main():
     expert_trajectories = rollout.rollout(
         noisy_bc_policy,
         venv,
-        rollout.make_sample_until(min_episodes=10),
+        rollout.make_sample_until(min_episodes=1000),
         rng=rngs,
         exclude_infos=False,
         label_info={"noise_level": epsilon},
@@ -76,7 +78,7 @@ def main():
     expert_trajectories_additional = rollout.rollout(
         noisy_bc_policy_2,
         venv,
-        rollout.make_sample_until(min_episodes=10),
+        rollout.make_sample_until(min_episodes=1000),
         rng=rngs,
         exclude_infos=False,
         label_info={"noise_level": epsilon},
@@ -92,13 +94,11 @@ def main():
     training_data = test_dataset.training_data
 
     ## Store trajectories
-    save_path_traj = (
-        "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/trajectories"
-    )
+    save_path_traj = SCRIPT_DIR / "trajectories"
     serialize.save(save_path_traj, test_dataset.demonstrations)
 
     ## Store training data
-    save_path_data = "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/training_data.pth"
+    save_path_data = SCRIPT_DIR / "training_data.pth"
     training_samples = []
     for i in range(len(test_dataset)):
         sample = test_dataset[i]

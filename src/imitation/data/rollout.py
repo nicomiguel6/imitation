@@ -404,7 +404,7 @@ def generate_trajectories(
             action. Note the trajectories might still be non-deterministic if the
             environment has non-determinism!
         rng: used for shuffling trajectories.
-        label_info: Will add noise labels to the info of each trajectory, 
+        label_info: Will add noise labels to the info of each trajectory,
             as a key: {"noise_level": epsilon}
 
     Returns:
@@ -413,8 +413,6 @@ def generate_trajectories(
         should truncate if required.
     """
     get_actions = policy_to_callable(policy, venv, deterministic_policy)
-
-
 
     # Collect rollout tuples.
     trajectories = []
@@ -426,8 +424,6 @@ def generate_trajectories(
         (np.ndarray, dict),
     ), "Tuple observations are not supported."
     wrapped_obs = types.maybe_wrap_in_dictobs(obs)
-
-    
 
     # we use dictobs to iterate over the envs in a vecenv
     for env_idx, ob in enumerate(wrapped_obs):
@@ -460,9 +456,7 @@ def generate_trajectories(
             if noise_mask is not None and len(noise_mask) != venv.num_envs:
                 noise_mask = None  # Ignore if shape doesn't match
 
-
         obs, rews, dones, infos = venv.step(acts)
-
 
         assert isinstance(
             obs,
@@ -484,15 +478,15 @@ def generate_trajectories(
             for env_idx in range(venv.num_envs):
                 # Start with existing info from environment
                 merged_info = dict(infos[env_idx])
-                
+
                 # Add noise_applied boolean for this specific environment
                 if noise_mask is not None:
                     merged_info["noise_applied"] = bool(noise_mask[env_idx])
-                
+
                 # Add label_info (same for all envs, like noise_level)
                 if label_info is not None:
                     merged_info.update(label_info)
-                
+
                 # Replace the info dict
                 infos[env_idx] = merged_info
 
@@ -713,7 +707,7 @@ def rollout(
     unwrap: bool = True,
     exclude_infos: bool = True,
     verbose: bool = True,
-    label_info: Optional[Dict[str,Any]] = None,
+    label_info: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
 ) -> Sequence[types.TrajectoryWithRew]:
     """Generate policy rollouts.
@@ -741,7 +735,7 @@ def rollout(
             this field to None. Excluding `infos` can save a lot of space during
             pickles.
         verbose: If True, then print out rollout stats before saving.
-        label_info: Will add noise labels to the info of each trajectory, 
+        label_info: Will add noise labels to the info of each trajectory,
             as a key: {"noise_level": epsilon}
         **kwargs: Passed through to `generate_trajectories`.
 

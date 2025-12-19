@@ -26,7 +26,7 @@ from imitation.data import serialize
 
 def main():
     """Generate expert demonstration on seals' Mountain Car Continuous."""
-    print("Generating expert demonstrations on MountainCarContinuous-v0...")
+    print("Generating expert demonstrations on seals' MountainCar-v0...")
 
     # Path to save/load the model
     model_path = "expert_policy.zip"
@@ -35,7 +35,7 @@ def main():
 
     # Setup environment
     venv = util.make_vec_env(
-        "MountainCarContinuous-v0",
+        "seals/MountainCar-v0",
         rng=rngs,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
     )
@@ -55,7 +55,7 @@ def main():
     # Generate expert demonstrations
     print("Generating expert demonstrations...")
     expert_trajectories = rollout.rollout(
-        expert_policy, venv, rollout.make_sample_until(min_episodes=10), rng=rngs
+        expert_policy, venv, rollout.make_sample_until(min_episodes=100), rng=rngs
     )
 
     print(f"Generated {len(expert_trajectories)} expert trajectories")

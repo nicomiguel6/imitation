@@ -8,26 +8,23 @@
           "dtype": "float32",
           "_type": "Value"
         },
-        "_type": "Sequence"
+        "_type": "List"
       },
-      "_type": "Sequence"
+      "_type": "List"
     },
     "acts": {
       "feature": {
-        "feature": {
-          "dtype": "float32",
-          "_type": "Value"
-        },
-        "_type": "Sequence"
+        "dtype": "int64",
+        "_type": "Value"
       },
-      "_type": "Sequence"
+      "_type": "List"
     },
     "infos": {
       "feature": {
         "dtype": "string",
         "_type": "Value"
       },
-      "_type": "Sequence"
+      "_type": "List"
     },
     "terminal": {
       "dtype": "bool",
@@ -38,7 +35,7 @@
         "dtype": "float64",
         "_type": "Value"
       },
-      "_type": "Sequence"
+      "_type": "List"
     }
   },
   "homepage": "",

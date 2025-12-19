@@ -14,11 +14,8 @@
     },
     "acts": {
       "feature": {
-        "feature": {
-          "dtype": "float32",
-          "_type": "Value"
-        },
-        "_type": "List"
+        "dtype": "int64",
+        "_type": "Value"
       },
       "_type": "List"
     },

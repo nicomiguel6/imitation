@@ -6,6 +6,7 @@ import gymnasium as gym
 import osqp
 import hypothesis
 import hypothesis.strategies as st
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -21,17 +22,42 @@ from imitation.util import logger, util
 from imitation.util.logger import configure
 from imitation.data import serialize
 
+# Ensure all trajectory data is float32 for MPS compatibility
+import dataclasses
+
 
 def main():
     """Load expert trajectories as training data"""
     traj_path = "expert_traj"
     expert_traj = serialize.load(traj_path)
+    device = "mps"
+
+    if device == "mps":
+        torch.set_default_dtype(torch.float32)
+
+        converted_trajs = []
+        for traj in expert_traj:
+            converted_trajs.append(
+                dataclasses.replace(
+                    traj,
+                    obs=(
+                        traj.obs.astype(np.float32)
+                        if hasattr(traj.obs, "astype")
+                        else traj.obs
+                    ),
+                    acts=traj.acts.astype(np.float32),
+                    rews=(
+                        traj.rews.astype(np.float32) if hasattr(traj, "rews") else None
+                    ),
+                )
+            )
+        expert_traj = converted_trajs
 
     """ Load environment observation and action spaces """
     # Setup environment
     rngs = np.random.default_rng()
     venv = util.make_vec_env(
-        "MountainCarContinuous-v0",
+        "seals/MountainCar-v0",
         rng=rngs,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
     )
@@ -42,7 +68,7 @@ def main():
         action_space=venv.action_space,
         rng=rngs,
         demonstrations=expert_traj,
-        device="cuda",
+        device=device,
     )
 
     """ Train BC Policy """

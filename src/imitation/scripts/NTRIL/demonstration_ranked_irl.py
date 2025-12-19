@@ -206,6 +206,9 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
         self.segment_length = segment_length
         self.device = device
 
+        # Move reward network to device
+        self.reward_net = self.reward_net.to(device)
+
         # Initialize optimizer
         self.optimizer = th.optim.Adam(
             self.reward_net.parameters(),

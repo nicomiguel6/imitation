@@ -1,5 +1,6 @@
 """Code for testing and debugging NTRIL. Step 2: Generating noisy rollouts."""
 
+import pathlib
 import numpy as np
 import os
 import gymnasium as gym
@@ -11,16 +12,21 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from imitation.data import rollout
-from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector, NoisyPolicy
+from imitation.scripts.NTRIL.noise_injection import (
+    EpsilonGreedyNoiseInjector,
+    NoisyPolicy,
+)
 from imitation.algorithms import bc
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.util import util
 
-def main():
 
+def main():
     """Load BC policy"""
-    policy_path = "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/testcode/BC_policy"
-    bc_policy = bc.reconstruct_policy(policy_path, device="cuda")
+    # Get the directory where this script is located
+    SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+    policy_path = SCRIPT_DIR / "BC_policy"
+    bc_policy = bc.reconstruct_policy(policy_path, device="mps")
 
     """Noise Injector"""
     epsilon = 0.1
@@ -31,10 +37,14 @@ def main():
 
     """Generate environment"""
     rngs = np.random.default_rng()
-    
+
     # Setup environment
-    venv = util.make_vec_env("MountainCarContinuous-v0", rng=rngs, post_wrappers = [lambda e, _: RolloutInfoWrapper(e)])
-    
+    venv = util.make_vec_env(
+        "seals/MountainCar-v0",
+        rng=rngs,
+        post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
+    )
+
     # Generate expert demonstrations
     print("Generating expert demonstrations...")
     expert_trajectories = rollout.rollout(
@@ -43,7 +53,7 @@ def main():
         rollout.make_sample_until(min_episodes=10),
         rng=rngs,
         exclude_infos=False,
-        label_info={'noise_level': epsilon},
+        label_info={"noise_level": epsilon},
     )
 
     # Count noise deviations
@@ -51,7 +61,6 @@ def main():
         noise_count = sum(info.get("noise_applied", False) for info in traj.infos)
         print(f"Trajectory {i}: {noise_count}/{len(traj)} timesteps had noise")
 
-    
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
