@@ -24,9 +24,10 @@ from imitation.util import util
 def main():
     """Load BC policy"""
     # Get the directory where this script is located
+    device = "cuda"
     SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
     policy_path = SCRIPT_DIR / "BC_policy"
-    bc_policy = bc.reconstruct_policy(policy_path, device="mps")
+    bc_policy = bc.reconstruct_policy(policy_path, device=device)
 
     """Noise Injector"""
     epsilon = 0.1

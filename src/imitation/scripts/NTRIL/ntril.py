@@ -3,6 +3,7 @@
 import abc
 import logging
 import os
+import dataclasses
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
@@ -24,117 +25,83 @@ from imitation.util import util
 
 logger = logging.getLogger(__name__)
 
-
+@dataclasses.dataclass(frozen=True)
 class NTRILTrainer(base.BaseImitationAlgorithm):
-    """Noisy Trajectory Ranked Imitation Learning trainer.
+    """Noisy Trajectory Ranked Imitation Learning trainer."""
+    
+    # Required fields
+    demonstrations: Sequence[types.Trajectory]
+    venv: vec_env.VecEnv
 
-    This class implements the complete NTRIL pipeline:
-    1. Train BC policy on demonstrations
-    2. Generate noisy rollouts with varying noise levels
-    3. Apply robust tube MPC for data augmentation
-    4. Build ranked dataset
-    5. Train reward network using demonstration ranked IRL
-    6. Train final policy using RL
-    """
-
-    def __init__(
-        self,
-        demonstrations: Sequence[types.Trajectory],
-        venv: vec_env.VecEnv,
-        policy: Optional[policies.BasePolicy] = None,
-        *,
-        noise_levels: Sequence[float] = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5),
-        n_rollouts_per_noise: int = 10,
-        mpc_horizon: int = 10,
-        disturbance_bound: float = 0.1,
-        bc_batch_size: int = 32,
-        bc_train_kwargs: Optional[Mapping[str, Any]] = None,
-        reward_net: Optional[reward_nets.RewardNet] = None,
-        irl_batch_size: int = 32,
-        irl_lr: float = 1e-3,
-        custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
-        save_dir: Optional[str] = None,
-        **kwargs,
-    ):
-        """Initialize NTRIL trainer.
-
-        Args:
-            demonstrations: Expert demonstration trajectories
-            venv: Vectorized environment for rollout collection
-            policy: Initial policy (if None, will be created during BC training)
-            noise_levels: Sequence of noise levels to apply to policy
-            n_rollouts_per_noise: Number of rollouts to collect per noise level
-            mpc_horizon: Horizon for robust tube MPC
-            disturbance_bound: Bound for MPC disturbance set
-            bc_batch_size: Batch size for behavioral cloning
-            bc_train_kwargs: Additional kwargs for BC training
-            reward_net: Reward network (if None, will be created)
-            irl_batch_size: Batch size for IRL training
-            irl_lr: Learning rate for IRL training
-            custom_logger: Custom logger instance
-            **kwargs: Additional arguments passed to base class
-        """
-        super().__init__(custom_logger=custom_logger, **kwargs)
-
-        self.demonstrations = demonstrations
-        self.venv = venv
-        self.policy = policy
-        self.noise_levels = noise_levels
-        self.n_rollouts_per_noise = n_rollouts_per_noise
-
+    custom_logger: Optional[imit_logger.HierarchicalLogger] = None
+    # Training configuration
+    noise_levels: Sequence[float] = dataclasses.field(
+        default_factory=lambda: (0.0, 0.1, 0.2, 0.3, 0.4, 0.5)
+    )
+    n_rollouts_per_noise: int = 10
+    mpc_horizon: int = 10
+    disturbance_bound: float = 0.1
+    bc_batch_size: int = 32
+    bc_train_kwargs: Optional[Mapping[str, Any]] = None
+    reward_net: Optional[reward_nets.RewardNet] = None
+    irl_batch_size: int = 32
+    irl_lr: float = 1e-3
+    save_dir: Optional[str] = None
+    
+    def __post_init__(self):
+        """Initialize components after dataclass creation."""
+        # Device setup
         if th.cuda.is_available():
-            self.device = th.device("cuda:0")
+            device = th.device("cuda:0")
         else:
-            self.device = th.device("mps")
-
-        if save_dir is None:
-            self.save_dir = os.path.join(
+            device = th.device("cpu")
+        object.__setattr__(self, 'device', device)
+        
+        # Save dir setup
+        if self.save_dir is None:
+            save_dir = os.path.join(
                 os.getcwd(), "ntril_runs", datetime.now().strftime("%Y%m%d-%H%M%S")
             )
         else:
-            self.save_dir = save_dir
-
-        # Initialize components
-        self.noise_injector = NoiseInjector()
-        self.robust_mpc = RobustTubeMPC(
-            horizon=mpc_horizon,
-            disturbance_bound=disturbance_bound,
+            save_dir = os.path.abspath(self.save_dir)
+        os.makedirs(save_dir, exist_ok=True)
+        object.__setattr__(self, 'save_dir', save_dir)
+        
+        # BC trainer - policy will be auto-created
+        bc_trainer = bc.BC(
+            observation_space=self.venv.observation_space,
+            action_space=self.venv.action_space,
+            policy=None,  
+            demonstrations=self.demonstrations,
+            batch_size=self.bc_batch_size,
+            device=device,
+            custom_logger=self.custom_logger,
+            **(self.bc_train_kwargs or {}),
         )
-        self.dataset_builder = RankedDatasetBuilder()
-
-        # BC trainer
-        self.bc_trainer = bc.BC(
-            observation_space=venv.observation_space,
-            action_space=venv.action_space,
-            policy=policy,
-            demonstrations=demonstrations,
-            batch_size=bc_batch_size,
-            device=self.device,
-            custom_logger=self._logger,
-            **(bc_train_kwargs or {}),
-        )
-
-        # Reward network and IRL
-        if reward_net is None:
-            reward_net = reward_nets.BasicRewardNet(
-                venv.observation_space,
-                venv.action_space,
+        object.__setattr__(self, 'bc_trainer', bc_trainer)
+        
+        # Reward network
+        if self.reward_net is None:
+            reward_net = reward_nets.TrajectoryRewardNet(
+                observation_space=self.venv.observation_space,
+                action_space=self.venv.action_space,
+                use_state=True,
+                use_action=False,
+                use_next_state=False,
+                use_done=False,
             )
-
-        self.irl_trainer = DemonstrationRankedIRL(
-            reward_net=reward_net,
-            venv=venv,
-            batch_size=irl_batch_size,
-            lr=irl_lr,
-            custom_logger=self._logger,
-        )
-
-        # Storage for intermediate results
-        self.bc_policy: Optional[policies.BasePolicy] = None
-        self.noisy_rollouts: List[List[types.Trajectory]] = []
-        self.augmented_data: List[types.Transitions] = []
-        self.ranked_dataset: Optional[types.Transitions] = None
-        self.learned_reward_net: Optional[reward_nets.RewardNet] = None
+            object.__setattr__(self, 'reward_net', reward_net)
+        
+        # Move reward net to device
+        self.reward_net.to(device)
+        
+        # Storage for training artifacts
+        object.__setattr__(self, 'bc_policy', None)
+        object.__setattr__(self, 'noisy_rollouts', [])
+        object.__setattr__(self, 'augmented_data', [])
+        object.__setattr__(self, 'ranked_dataset', None)
+        object.__setattr__(self, 'learned_reward_net', None)
+        object.__setattr__(self, 'final_policy', None)
 
     def train(
         self,

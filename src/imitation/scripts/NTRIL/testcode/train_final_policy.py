@@ -42,7 +42,7 @@ from imitation.scripts.train_rl import train_rl
 
 def main():
     # reload device
-    device = "mps"
+    device = "cuda"
     if device == "mps":
         torch.set_default_dtype(torch.float32)
     else:
