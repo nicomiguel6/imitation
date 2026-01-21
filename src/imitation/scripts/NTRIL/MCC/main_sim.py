@@ -70,7 +70,7 @@ def generate_expert_demonstrations(
     )
 
     # Determine which checkpoint to use
-    if use_checkpoint_at is None:
+    if use_checkpoint_at is None: # Use final trained policy
         checkpoint_timesteps = train_timesteps
         model_name = f"expert_policy_final_{train_timesteps}"
         MODEL_PATH = CHECKPOINTS_DIR / f"{model_name}.zip"
@@ -82,7 +82,7 @@ def generate_expert_demonstrations(
     
     DEMO_PATH = DEMOS_DIR / f"{model_name}_demos.pkl"
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Training timesteps: {train_timesteps}")
     print(f"  Checkpoint interval: {checkpoint_interval}")
     print(f"  Using checkpoint at: {checkpoint_timesteps} steps")
@@ -206,6 +206,7 @@ def run_ntril_training(
     n_rollouts_per_noise: int = 10,
     bc_epochs: int = 50,
     rl_total_timesteps: int = 100000,
+    run_individual_steps: Optional[list] = None,
 ):
     """Run NTRIL training using the NTRILTrainer class.
 
@@ -266,25 +267,90 @@ def run_ntril_training(
     )
 
     # Run training
-    print("\nStarting NTRIL training pipeline...")
-    training_stats = ntril_trainer.train(
-        total_timesteps=rl_total_timesteps,
-        bc_train_kwargs={"n_epochs": bc_epochs, "progress_bar": True},
-        irl_train_kwargs={},
-        rl_train_kwargs={},
-    )
+    irl_train_kwargs = {}
+    rl_train_kwargs = {}
+    if run_individual_steps is None:
+        print("\nStarting NTRIL training pipeline...")
+        training_stats = ntril_trainer.train(
+            total_timesteps=rl_total_timesteps,
+            bc_train_kwargs={"n_epochs": bc_epochs, "progress_bar": True},
+            irl_train_kwargs=irl_train_kwargs,
+            rl_train_kwargs=rl_train_kwargs,
+        )
 
-    print("\n" + "=" * 70)
-    print("NTRIL Training Complete!")
-    print("=" * 70)
-    print("\nTraining Statistics:")
-    for stage, stats in training_stats.items():
-        print(f"\n{stage.upper()}:")
-        for key, value in stats.items():
-            print(f"  {key}: {value}")
+        print("\n" + "=" * 70)
+        print("NTRIL Training Complete!")
+        print("=" * 70)
+        print("\nTraining Statistics:")
+        for stage, stats in training_stats.items():
+            print(f"\n{stage.upper()}:")
+            for key, value in stats.items():
+                print(f"  {key}: {value}")
 
+    else:
+        # Run specific steps
+        print(f"\nRunning NTRIL steps: {run_individual_steps}")
+        step_results = {}
+        
+        for step_num in sorted(run_individual_steps):
+            print(f"\n{'='*60}")
+            print(f"Running Step {step_num}")
+            print(f"{'='*60}")
+            
+            if step_num == 1:
+                print("Step 1: Training BC policy from demonstrations...")
+                bc_stats = ntril_trainer._train_bc_policy(
+                    n_epochs=bc_epochs, 
+                    progress_bar=True
+                )
+                step_results['bc'] = bc_stats
+                print("\nBC Training Stats:")
+                for key, value in bc_stats.items():
+                    print(f"  {key}: {value}")
+                    
+            elif step_num == 2:
+                print("Step 2: Generating noisy rollouts...")
+                rollout_stats = ntril_trainer._generate_noisy_rollouts()
+                step_results['rollouts'] = rollout_stats
+                print(f"\nGenerated rollouts for {len(ntril_trainer.noise_levels)} noise levels")
+                
+            elif step_num == 3:
+                print("Step 3: Augmenting data with robust tube MPC...")
+                augmentation_stats = ntril_trainer._augment_data_with_mpc()
+                step_results['augmentation'] = augmentation_stats
+                print("\nData augmentation complete")
+                
+            elif step_num == 4:
+                print("Step 4: Building ranked dataset...")
+                ranking_stats = ntril_trainer._build_ranked_dataset()
+                step_results['ranking'] = ranking_stats
+                print("\nRanked dataset built")
+                
+            elif step_num == 5:
+                print("Step 5: Training reward network with demonstration ranked IRL...")
+                irl_stats = ntril_trainer._train_reward_network(**(irl_train_kwargs or {}))
+                step_results['irl'] = irl_stats
+                print("\nIRL training complete")
+                
+            elif step_num == 6:
+                print("Step 6: Training final policy using learned reward...")
+                rl_stats = ntril_trainer._train_final_policy(
+                    total_timesteps=rl_total_timesteps, 
+                    **(rl_train_kwargs or {})
+                )
+                step_results['rl'] = rl_stats
+                print("\nFinal policy training complete")
+                
+            else:
+                raise ValueError(f"Invalid step number: {step_num}. Must be 1-6.")
+        
+        print(f"\n{'='*70}")
+        print(f"Completed Steps: {run_individual_steps}")
+        print(f"{'='*70}")
+    
     venv.close()
     return ntril_trainer
+        
 
 
 def evaluate_policy(
@@ -386,11 +452,14 @@ def main():
         demonstrations=demonstrations,
         env_id=env_id,
         save_dir=str(SAVE_DIR),
-        noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5),
+        noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
         n_rollouts_per_noise=10,
         bc_epochs=50,
         rl_total_timesteps=100_000,
+        run_individual_steps=[1,2], # Change to None to run full training
     )
+
+
 
     # # Step 3: Evaluate the trained policy
     # eval_metrics = evaluate_policy(

@@ -16,16 +16,18 @@ from imitation.algorithms import base, bc
 from imitation.data import rollout, types
 from imitation.policies import base as policy_base
 from imitation.rewards import reward_nets
-from imitation.scripts.NTRIL.noise_injection import NoiseInjector
+from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
 from imitation.scripts.NTRIL.ranked_dataset import RankedDatasetBuilder
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
 from imitation.scripts.NTRIL.demonstration_ranked_irl import DemonstrationRankedIRL
 from imitation.util import logger as imit_logger
 from imitation.util import util
 
+from matplotlib import pyplot as plt
+
 logger = logging.getLogger(__name__)
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass
 class NTRILTrainer(base.BaseImitationAlgorithm):
     """Noisy Trajectory Ranked Imitation Learning trainer."""
     
@@ -47,6 +49,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     irl_batch_size: int = 32
     irl_lr: float = 1e-3
     save_dir: Optional[str] = None
+    rng: int = 42
     
     def __post_init__(self):
         """Initialize components after dataclass creation."""
@@ -67,6 +70,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         os.makedirs(save_dir, exist_ok=True)
         object.__setattr__(self, 'save_dir', save_dir)
         
+        object.__setattr__(self, 'rng', np.random.default_rng(self.rng))
         # BC trainer - policy will be auto-created
         bc_trainer = bc.BC(
             observation_space=self.venv.observation_space,
@@ -76,6 +80,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             batch_size=self.bc_batch_size,
             device=device,
             custom_logger=self.custom_logger,
+            rng=self.rng,
             **(self.bc_train_kwargs or {}),
         )
         object.__setattr__(self, 'bc_trainer', bc_trainer)
@@ -157,18 +162,26 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
     def _train_bc_policy(self, **kwargs) -> Dict[str, Any]:
         """Train the initial BC policy."""
-        self.save_bc_policy_dir = os.path.join(self.save_dir, "BC_policy")
+        self.save_initial_bc_policy_dir = os.path.join(self.save_dir, "initial_BC_policy")
 
-        self.bc_trainer.train(**kwargs)
-        self.bc_policy = self.bc_trainer.policy
+        # check if it already exists
+        if os.path.exists(self.save_initial_bc_policy_dir):
+            print("Loading existing BC policy...")
+            self.bc_policy = bc.reconstruct_policy(
+                self.save_initial_bc_policy_dir, device=self.device)
+        else:
+            print("Training BC policy...")
+            self.bc_trainer.train(**kwargs)
+            self.bc_policy = self.bc_trainer.policy
 
-        util.save_policy(self.bc_policy, self.save_bc_policy_dir)
+        util.save_policy(self.bc_policy, self.save_initial_bc_policy_dir)
 
         # Evaluate BC policy
         bc_rollouts = rollout.rollout(
             self.bc_policy,
             self.venv,
             rollout.make_sample_until(min_timesteps=1000),
+            rng=self.rng,
         )
 
         return {
@@ -186,6 +199,9 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
         self.noisy_rollouts = []
         total_rollouts = 0
+        self.noise_injector = EpsilonGreedyNoiseInjector()
+
+        noise_rollout_data = {}
 
         for noise_level in self.noise_levels:
             # Create noisy policy
@@ -199,16 +215,34 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 self.venv,
                 rollout.make_sample_until(
                     min_episodes=self.n_rollouts_per_noise,
-                    min_timesteps=None,
+                    min_timesteps=1000,
                 ),
+                rng=self.rng,
             )
 
             self.noisy_rollouts.append(rollouts)
             total_rollouts += len(rollouts)
 
-            self._logger.log(
-                f"Collected {len(rollouts)} rollouts with noise level {noise_level}"
-            )
+            # self._logger.log(
+            #     f"Collected {len(rollouts)} rollouts with noise level {noise_level}"
+            # )
+
+            mean_reward = np.mean([sum(traj.rews) for traj in rollouts])
+            std_reward = np.std([sum(traj.rews) for traj in rollouts])
+            noise_rollout_data[noise_level] = (mean_reward, std_reward)
+
+        plot_path = os.path.join(self.save_dir, "noise_levels_visualization.png")
+
+        # Visualize noise levels in rollouts with std deviation plot
+        plt.errorbar(self.noise_levels, 
+                     [noise_rollout_data[n][0] for n in self.noise_levels],
+                     yerr=[noise_rollout_data[n][1] for n in self.noise_levels],
+                     fmt='-o')
+        plt.xlabel('Noise Level (Epsilon)')
+        plt.ylabel('Mean Return')
+        plt.title('Noisy Rollouts Performance')
+        plt.savefig(plot_path)
+        plt.close()
 
         return {
             "total_rollouts": total_rollouts,
