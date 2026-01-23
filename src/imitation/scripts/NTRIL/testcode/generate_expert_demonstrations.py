@@ -10,6 +10,7 @@ import seals
 # import hypothesis.strategies as st
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.callbacks import BaseCallback
 
 from imitation.data import rollout
 
@@ -24,11 +25,34 @@ from imitation.util.logger import configure
 from imitation.data import serialize
 
 
-def main():
-    """Generate expert demonstration on seals' Mountain Car Continuous."""
-    print("Generating expert demonstrations on seals' MountainCar-v0...")
+class SaveSuboptimalModelsCallback(BaseCallback):
+    """
+    Callback to save model parameters at regular intervals during training.
+    This allows capturing suboptimal policies at different stages of learning.
+    """
 
-    # Path to save/load the model
+    def __init__(self, save_freq: int, save_path: str, verbose: int = 0):
+        super().__init__(verbose)
+        self.save_freq = save_freq
+        self.save_path = save_path
+        os.makedirs(save_path, exist_ok=True)
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            model_path = os.path.join(
+                self.save_path, f"model_step_{self.num_timesteps}.zip"
+            )
+            self.model.save(model_path)
+            if self.verbose > 0:
+                print(f"Saved suboptimal model at step {self.num_timesteps}")
+        return True
+
+
+def main():
+    """Train expert policy and save checkpoints during training."""
+    print("Training expert policy on seals' MountainCar-v0...")
+
+    # Path to save the final expert model
     model_path = "expert_policy.zip"
 
     rngs = np.random.default_rng()
@@ -40,29 +64,23 @@ def main():
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
     )
 
-    if os.path.exists(model_path):
-        print(f"Loading existing model from {model_path}...")
-        expert_policy = PPO.load(model_path, env=venv)
-    else:
-        # Train expert policy (or load pre-trained)
-        print("Training expert policy...")
-        expert_policy = PPO("MlpPolicy", venv, verbose=0)
-        expert_policy.learn(total_timesteps=10000)
+    # Train expert policy and save checkpoints
+    print("Training expert policy...")
+    expert_policy = PPO("MlpPolicy", venv, verbose=1)
 
-        # Save trained model
-        expert_policy.save(model_path)
-
-    # Generate expert demonstrations
-    print("Generating expert demonstrations...")
-    expert_trajectories = rollout.rollout(
-        expert_policy, venv, rollout.make_sample_until(min_episodes=100), rng=rngs
+    # Create callback to save suboptimal models during training
+    suboptimal_save_path = "suboptimal_models"
+    save_callback = SaveSuboptimalModelsCallback(
+        save_freq=1000,  # Save every 1000 steps
+        save_path=suboptimal_save_path,
+        verbose=1,
     )
 
-    print(f"Generated {len(expert_trajectories)} expert trajectories")
-    # Save expert trajectories
-    traj_path = "expert_traj"
-    serialize.save(traj_path, expert_trajectories)
-    print(f"Expert trajectories saved to {traj_path}")
+    expert_policy.learn(total_timesteps=10000, callback=save_callback)
+
+    # Save final trained model
+    expert_policy.save(model_path)
+    print(f"Final expert policy saved to {model_path}")
 
 
 if __name__ == "__main__":
