@@ -1,9 +1,10 @@
 """Main NTRIL (Noisy Trajectory Ranked Imitation Learning) algorithm implementation."""
 
 import abc
+import dataclasses
+import json
 import logging
 import os
-import dataclasses
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
@@ -200,6 +201,14 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         self.noisy_rollouts = []
         total_rollouts = 0
         self.noise_injector = EpsilonGreedyNoiseInjector()
+        noisy_policies_dir = os.path.join(self.save_dir, "noisy_policies")
+        os.makedirs(noisy_policies_dir, exist_ok=True)
+
+        base_policy_path = os.path.join(noisy_policies_dir, "base_policy.pt")
+        if not os.path.exists(base_policy_path):
+            util.save_policy(self.bc_policy, base_policy_path)
+
+        noisy_policies_metadata = []
 
         noise_rollout_data = {}
 
@@ -207,6 +216,13 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             # Create noisy policy
             noisy_policy = self.noise_injector.inject_noise(
                 self.bc_policy, noise_level=noise_level
+            )
+            noisy_policies_metadata.append(
+                {
+                    "noise_level": float(noise_level),
+                    "base_policy_path": base_policy_path,
+                    "noise_injector": type(self.noise_injector).__name__,
+                }
             )
 
             # Collect rollouts
@@ -230,6 +246,10 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             mean_reward = np.mean([sum(traj.rews) for traj in rollouts])
             std_reward = np.std([sum(traj.rews) for traj in rollouts])
             noise_rollout_data[noise_level] = (mean_reward, std_reward)
+
+        metadata_path = os.path.join(noisy_policies_dir, "noisy_policies.json")
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(noisy_policies_metadata, f, indent=2)
 
         plot_path = os.path.join(self.save_dir, "noise_levels_visualization.png")
 
@@ -329,6 +349,16 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             "total_timesteps": total_timesteps,
             "final_policy_trained": True,
         }
+    
+    @property
+    def robust_mpc(self) -> RobustTubeMPC:
+        """Return the current Robust Tube MPC."""
+        return self._robust_mpc
+
+    @robust_mpc.setter
+    def robust_mpc(self, robust_mpc: RobustTubeMPC):
+        """Function to catch external Robust Tube MPC. Main file running the trainer should set up the robust tube MPC and then pass it here."""
+        self.robust_mpc = robust_mpc
 
     @property
     def policy(self) -> policies.BasePolicy:

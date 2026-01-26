@@ -14,17 +14,20 @@ initial_state = obs
 # Store states and actions for plotting
 states = []
 actions = []
+rewards = []
 
 for i in range(env.unwrapped.max_episode_steps):
     action = env.unwrapped.suboptimal_expert(obs)
     obs, reward, terminated, truncated, info = env.step(action)
     states.append(obs)
     actions.append(action)
+    rewards.append(reward)
     if terminated or truncated:
         break
 
 # print final observation
 print("Final state: ", obs)
+print("Final reward: ", sum(rewards))
 
 # Plot only x and y positions
 states = np.array(states)

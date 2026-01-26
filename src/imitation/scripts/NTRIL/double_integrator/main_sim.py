@@ -24,16 +24,20 @@ import gymnasium as gym
 import dataclasses
 from stable_baselines3 import PPO
 
+from imitation.algorithms import bc
 from imitation.data import rollout, serialize
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.util import util, logger as imit_logger
 from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.rewards.reward_nets import BasicRewardNet
 from imitation.rewards.reward_wrapper import RewardVecEnvWrapper
+from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
+
+import matplotlib.pyplot as plt
 
 
 def generate_expert_demonstrations(
-    env_id: str = "MountainCarContinuous-v0",
+    env_id: str = "DoubleIntegrator-v0",
     device: str = "cuda",
     n_episodes: int = 20,
     train_timesteps: int = 10_000_000,
@@ -147,7 +151,7 @@ def generate_expert_demonstrations(
         # Save final model
         final_path = CHECKPOINTS_DIR / f"expert_policy_final_{train_timesteps}.zip"
         expert_policy.save(str(final_path))
-        print(f"\n✓ Training complete!")
+        print("\n✓ Training complete!")
         print(f"✓ Final policy saved to {final_path}")
         print(f"✓ Checkpoints saved in {CHECKPOINTS_DIR}")
 
@@ -171,10 +175,10 @@ def generate_expert_demonstrations(
             if MODEL_PATH.exists():
                 print(f"  Loading {MODEL_PATH}...")
                 expert_policy = PPO.load(str(MODEL_PATH), env=venv, device=device)
-                print(f"✓ Loaded checkpoint")
+                print("✓ Loaded checkpoint")
             else:
-                print(f"  ERROR: Checkpoint not found after training!")
-                print(f"  Using final trained policy instead.")
+                print("  ERROR: Checkpoint not found after training!")
+                print("  Using final trained policy instead.")
 
     # ============================================================
     # GENERATE DEMONSTRATIONS
@@ -206,13 +210,14 @@ def generate_expert_demonstrations(
 
 def run_ntril_training(
     demonstrations,
-    env_id: str = "MountainCarContinuous-v0",
+    env_id: str = "DoubleIntegrator-v0",
     save_dir: str = "./ntril_outputs",
     noise_levels: tuple = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5),
     n_rollouts_per_noise: int = 10,
     bc_epochs: int = 50,
     rl_total_timesteps: int = 100000,
     run_individual_steps: Optional[list] = None,
+    just_plot_noisy_rollouts: bool = False,
 ):
     """Run NTRIL training using the NTRILTrainer class.
 
@@ -224,6 +229,8 @@ def run_ntril_training(
         n_rollouts_per_noise: Number of rollouts per noise level
         bc_epochs: Number of epochs for BC training
         rl_total_timesteps: Total timesteps for final RL training
+        run_individual_steps: List of steps to run individually
+        just_plot_noisy_rollouts: Whether to just plot noisy rollouts (warning, this will override run_individual_steps)
 
     Returns:
         Trained NTRILTrainer instance
@@ -275,6 +282,23 @@ def run_ntril_training(
     # Run training
     irl_train_kwargs = {}
     rl_train_kwargs = {}
+    
+    if just_plot_noisy_rollouts: # hijack the training pipeline to just plot small noisy rollouts
+        print("Just plotting noisy rollouts...")
+        device = "cuda"
+        # Load bc policy
+        for noise_level in noise_levels:
+            bc_policy = bc.reconstruct_policy(os.path.join(save_dir, "initial_BC_policy"), device=device)
+            noisy_policy = EpsilonGreedyNoiseInjector().inject_noise(
+                bc_policy, noise_level=noise_level
+            )
+            rollouts = rollout.rollout(
+                noisy_policy, venv, rollout.make_sample_until(min_episodes=2), rng=rng
+            )
+            plot_noisy_rollouts(noise_level, rollouts)
+
+        return
+
     if run_individual_steps is None:
         print("\nStarting NTRIL training pipeline...")
         training_stats = ntril_trainer.train(
@@ -362,9 +386,27 @@ def run_ntril_training(
     return ntril_trainer
 
 
+def plot_noisy_rollouts(noise_level, noisy_rollouts, max_rollouts_per_level: int = 2):
+    """Plot a few rollouts for each noise level, on separate figures."""
+    print("Plotting noisy rollouts...")
+    fig, ax = plt.subplots()
+    for traj in noisy_rollouts[:max_rollouts_per_level]:
+        ax.plot(traj.obs[:, 0], traj.obs[:, 2], label=f"Noise {noise_level}")
+        ax.plot(traj.obs[0, 0], traj.obs[0, 2], "b+", label="Initial Position")
+        ax.plot(traj.obs[-1, 0], traj.obs[-1, 2], "g+", label="Final Position")
+    ax.legend()
+    ax.plot(0, 0, "ro", label="Target Position")
+    ax.set_xlabel("X Position")
+    ax.set_ylabel("Y Position")
+    ax.set_title(f"Noisy Rollouts at Noise Level {noise_level}")
+    plt.savefig(f"debug/plots/noisy_rollouts_{noise_level}.png")
+    plt.close()
+
+    print("Noisy rollouts plotted successfully")
+
 def evaluate_policy(
     policy,
-    env_id: str = "MountainCarContinuous-v0",
+    env_id: str = "DoubleIntegrator-v0",
     n_episodes: int = 10,
 ):
     """Evaluate a trained policy.
@@ -413,7 +455,7 @@ def evaluate_policy(
 def main():
     """Run the complete NTRIL example."""
     # Configuration
-    print("Generating expert demonstrations on seals' MountainCar-v0...")
+    print("Generating expert demonstrations on DoubleIntegrator-v0...")
 
     # Get the directory where THIS script is located
     SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -428,10 +470,10 @@ def main():
         device = th.device("cuda" if th.cuda.is_available() else "cpu")
 
     rngs = np.random.default_rng()
-    env_id = "seals/MountainCar-v0"
+    env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
 
     print("\n" + "=" * 70)
-    print("NTRIL PIPELINE FOR MOUNTAINCARCONTINUOUS-V0")
+    print("NTRIL PIPELINE FOR DOUBLEINTEGRATOR-V0")
     print("=" * 70)
     print(f"\nEnvironment: {env_id}")
 
@@ -444,7 +486,7 @@ def main():
         train_timesteps=1_100_000,  # Train fully
         checkpoint_interval=1_000_000,  # Save every 10k steps
         use_checkpoint_at=desired_steps,  # Use 30% trained policy (SUBOPTIMAL!)
-        force_retrain=False,
+        force_retrain=True,
     )
 
     # Step 1.5: Collect reward statistics on suboptimal demonstrations
@@ -464,7 +506,9 @@ def main():
         bc_epochs=50,
         rl_total_timesteps=100_000,
         run_individual_steps=[1, 2],  # Change to None to run full training
+        just_plot_noisy_rollouts=False,
     )
+
 
     # # Step 3: Evaluate the trained policy
     # eval_metrics = evaluate_policy(

@@ -159,9 +159,9 @@ class DoubleIntegratorEnv(gym.Env):
 
         self.step_count = 0
 
-        # Make initial velocity 0
-        self.state[1] = 0.1
-        self.state[3] = 0.1
+        # # Make initial velocity 0
+        # self.state[1] = 0.1
+        # self.state[3] = 0.1
 
         return self.state.copy(), {}
 
@@ -287,9 +287,4 @@ class DoubleIntegratorEnv(gym.Env):
         return np.array([u_x, u_y])
 
 
-# Register the environment with gymnasium
-gym.register(
-    id="DoubleIntegrator-v0",
-    entry_point=DoubleIntegratorEnv,
-    max_episode_steps=500,
-)
+
