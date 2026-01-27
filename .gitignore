@@ -160,3 +160,10 @@ dmypy.json
 /quickstart/
 
 .vscode/
+
+# NTRIL / training artifacts
+events.out.tfevents.*
+*.arrow
+*.zip
+*.png
+

@@ -32,6 +32,7 @@ from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.rewards.reward_nets import BasicRewardNet
 from imitation.rewards.reward_wrapper import RewardVecEnvWrapper
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
+from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
 
 import matplotlib.pyplot as plt
 
@@ -486,7 +487,7 @@ def main():
         train_timesteps=1_100_000,  # Train fully
         checkpoint_interval=1_000_000,  # Save every 10k steps
         use_checkpoint_at=desired_steps,  # Use 30% trained policy (SUBOPTIMAL!)
-        force_retrain=True,
+        force_retrain=False,
     )
 
     # Step 1.5: Collect reward statistics on suboptimal demonstrations
@@ -495,6 +496,20 @@ def main():
     lengths = [len(traj) for traj in demonstrations]
     print(f"  Mean return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
     print(f"  Mean length: {np.mean(lengths):.2f} ± {np.std(lengths):.2f}")
+
+    # Step 2: Set up robust tube MPC
+    robust_tube_mpc = RobustTubeMPC(
+        horizon = 10,
+        time_step = 0.1,
+        disturbance_bound = 0.1,
+        tube_radius = 0.05,
+        A = np.array([[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]]),
+        B = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]]),
+        Q = np.eye(4),
+        R = np.eye(2),
+        disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1]]),
+    )
+
 
     # Step 2: Run NTRIL training on suboptimal demos
     ntril_trainer = run_ntril_training(
