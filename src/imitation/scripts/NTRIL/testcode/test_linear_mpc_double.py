@@ -17,10 +17,10 @@ import pytope
 def main():
 
     # Set up discrete linear system
-    A = np.array([[0.0, 1.0], [0.0, 0.0]])
-    B = np.array([[0.0], [1.0]])
-    Q = np.diag([10.0, 10.0])
-    R = 0.1
+    A = np.array([[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]])
+    B = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]])
+    Q = np.diag([10.0, 0.0, 10.0, 0.0])
+    R = 0.1*np.diag([1.0, 1.0])
 
     P = solve_discrete_are(A, B, Q, R)
     K = -np.linalg.inv(B.T @ P @ B + R) @ (B.T @ P @ A)  # LQR gain
@@ -30,8 +30,8 @@ def main():
 
     dist_mag = 0.15
     # Set up disturbance with cdd
-    A_dist = np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]])
-    b_dist = dist_mag*np.array([1.0, 1.0, 1.0, 1.0])
+    A_dist = np.array([[1.0, 0.0, 0.0, 0.0], [-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, -1.0]])
+    b_dist = dist_mag*np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
 
 
     # W_vertex = np.array(
@@ -53,8 +53,8 @@ def main():
     H_mat = np.array([list(row) for row in H], dtype=float)
     W_b, W_A = H_mat[:, 0], -H_mat[:, 1:]
 
-    A_x, b_x = box_to_Ab(np.array([[-1.0], [-1.0]]), np.array([[1.0], [1.0]]))
-    A_u, b_u = box_to_Ab(np.array([[-1.0]]), np.array([[1.0]]))
+    A_x, b_x = box_to_Ab(np.array([[-10.0], [-10.0], [-10.0], [-10.0]]), np.array([[10.0], [10.0], [10.0], [10.0]]))
+    A_u, b_u = box_to_Ab(np.array([[-50.0], [-50.0]]), np.array([[50.0], [50.0]]))
 
     # Compute mrpi set
     A_F, b_F = compute_mrpi_hrep(Ak, W_polytope.A, W_polytope.b)
@@ -73,8 +73,8 @@ def main():
     model_type = "continuous"
     model = do_mpc.model.Model(model_type)
 
-    _x = model.set_variable(var_type="_x", var_name="x", shape=(2, 1))
-    _u = model.set_variable(var_type="_u", var_name="u", shape=(1, 1))
+    _x = model.set_variable(var_type="_x", var_name="x", shape=(4, 1))
+    _u = model.set_variable(var_type="_u", var_name="u", shape=(2, 1))
 
     x_next = A @ _x + B @ _u  # linear system without disturbance
 
@@ -94,26 +94,18 @@ def main():
         "collocation_ni": 1,
         "store_full_solution": True,
     }
-
-    opts = {
-        "ipopt.linear_solver": "ma57",
-        #"ipopt.hsllib": "/usr/local/lib/libcoinhsl.dylib",
-        "ipopt.print_level": 5,
-    }
-
-    # mpc.settings.nlpsol_opts = opts
-
+    
     # lower bounds of the states (x, xdot, y, ydot)
-    mpc.bounds["lower", "_x", "x"] = -np.array([b_x_t[1], b_x_t[3]])
+    mpc.bounds["lower", "_x", "x"] = -np.array([b_x_t[1], b_x_t[3], b_x_t[5], b_x_t[7]])
 
     # upper bounds of the states
-    mpc.bounds["upper", "_x", "x"] = np.array([b_x_t[0], b_x_t[2]])
+    mpc.bounds["upper", "_x", "x"] = np.array([b_x_t[0], b_x_t[2], b_x_t[4], b_x_t[6]])
 
     # lower bounds of the input (u_x, u_y)
-    mpc.bounds["lower", "_u", "u"] = -np.array([b_u_t[0]])
+    mpc.bounds["lower", "_u", "u"] = -np.array([b_u_t[0], b_u_t[2]])
 
     # upper bounds of the input
-    mpc.bounds["upper", "_u", "u"] = np.array([b_u_t[1]])
+    mpc.bounds["upper", "_u", "u"] = np.array([b_u_t[1], b_u_t[3]])
 
     mpc.set_param(**setup_mpc)
 
@@ -132,23 +124,23 @@ def main():
     #     a_j = ca.DM(A_u_t[j]).T     # (1 x n_u)
     #     mpc.set_nl_cons(f'U_{j}', a_j @ model.u['u'], ub=float(b_u_t[j]))
 
-    lterm = x.T @ Q @ x
+    lterm = x.T @ Q @ x + u.T @ R @ u
     mterm = x.T @ P @ x
 
     mpc.settings.set_linear_solver(solver_name="ma57")
     mpc.set_objective(mterm=mterm, lterm=lterm)
-    mpc.set_rterm(ca.SX(R))
+    # mpc.set_rterm(ca.SX(R))
 
     mpc.setup()
 
     # Generate the simulation model, which is a copy of the mpc model but with an added disturbance.
     dist_model = do_mpc.model.Model(model_type)
 
-    _x = dist_model.set_variable(var_type="_x", var_name="x", shape=(2, 1))
-    _u = dist_model.set_variable(var_type="_u", var_name="u", shape=(1, 1))
+    _x = dist_model.set_variable(var_type="_x", var_name="x", shape=(4, 1))
+    _u = dist_model.set_variable(var_type="_u", var_name="u", shape=(2, 1))
 
     # Set disturbance
-    _d = dist_model.set_variable(var_type="_p", var_name="d", shape=(2, 1))
+    _d = dist_model.set_variable(var_type="_p", var_name="d", shape=(4, 1))
 
     x_dist_next = A @ _x + B @ _u + _d
 
@@ -165,7 +157,7 @@ def main():
 
     simulator.set_p_fun(d_fun)
 
-    simulator.set_param(t_step=0.5)
+    simulator.set_param(t_step=0.1)
     simulator.setup()
 
     # Seed
@@ -173,14 +165,14 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x, 1])
-    x0 = np.array([1.0, 0.2])
+    x0 = np.array([-9, 8, 7, -2])
     mpc.x0 = x0
     simulator.x0 = x0
 
     # Use initial state to set the initial guess.
     mpc.set_initial_guess()
 
-    for k in range(100):
+    for k in range(20):
         u0 = mpc.make_step(x0)
         x_nom0 = mpc.data.prediction(("_x", "x"))[:, 0]
         print("Predicted trajectory: ", mpc.data.prediction(("_x", "x")))
