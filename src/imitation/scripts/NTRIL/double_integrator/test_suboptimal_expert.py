@@ -5,14 +5,14 @@ from imitation.scripts.NTRIL.double_integrator.double_integrator import (
 )
 import matplotlib.pyplot as plt
 
-env = gym.make("DoubleIntegrator-v0", target_x_position=1.0, target_y_position=1.0)
+env = gym.make("DoubleIntegrator-v0", target_position=1.0)
 obs, info = env.reset()
 
 # Store initial state
 initial_state = obs
 
 # Store states and actions for plotting
-states = []
+states = [obs.copy()]
 actions = []
 rewards = []
 
@@ -29,17 +29,14 @@ for i in range(env.unwrapped.max_episode_steps):
 print("Final state: ", obs)
 print("Final reward: ", sum(rewards))
 
-# Plot only x and y positions
+# Plot position over time
 states = np.array(states)
 actions = np.array(actions)
 
-plt.plot(initial_state[0], initial_state[2], "b+", label="initial position")
-plt.plot(states[:, 0], states[:, 2], "k-", label="position")
-plt.plot(
-    env.unwrapped.target_x_position,
-    env.unwrapped.target_y_position,
-    "ro",
-    label="reference position",
-)
+time_steps = np.arange(states.shape[0])
+plt.plot(initial_state[0], initial_state[1], "b+", label="initial position")
+plt.plot(states[:, 0], states[:, 1], "k-", label="trajectory")
+plt.xlabel("position")
+plt.ylabel("velocity")
 plt.legend()
 plt.show()

@@ -35,7 +35,7 @@
     },
     "rews": {
       "feature": {
-        "dtype": "float64",
+        "dtype": "float32",
         "_type": "Value"
       },
       "_type": "Sequence"

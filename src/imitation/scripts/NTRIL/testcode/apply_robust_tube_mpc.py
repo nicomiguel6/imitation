@@ -14,13 +14,16 @@ from scipy.spatial import ConvexHull
 import pytope
 
 
-def main():
+def main(use_disturbance=False, initial_state=None, plot=False) -> do_mpc.controller.MPC:
+
+    if initial_state is None:
+        initial_state = np.array([7.0, 5.0])
 
     # Set up discrete linear system
     A = np.array([[0.0, 1.0], [0.0, 0.0]])
     B = np.array([[0.0], [1.0]])
-    Q = np.diag([10.0, 10.0])
-    R = 0.1
+    Q = np.diag([10.0, 1.0])
+    R = 0.01*np.eye(1)
 
     P = solve_discrete_are(A, B, Q, R)
     K = -np.linalg.inv(B.T @ P @ B + R) @ (B.T @ P @ A)  # LQR gain
@@ -53,8 +56,8 @@ def main():
     H_mat = np.array([list(row) for row in H], dtype=float)
     W_b, W_A = H_mat[:, 0], -H_mat[:, 1:]
 
-    A_x, b_x = box_to_Ab(np.array([[-1.0], [-1.0]]), np.array([[1.0], [1.0]]))
-    A_u, b_u = box_to_Ab(np.array([[-1.0]]), np.array([[1.0]]))
+    A_x, b_x = box_to_Ab(np.array([[-10.0], [-10.0]]), np.array([[10.0], [10.0]]))
+    A_u, b_u = box_to_Ab(np.array([[-50.0]]), np.array([[50.0]]))
 
     # Compute mrpi set
     A_F, b_F = compute_mrpi_hrep(Ak, W_polytope.A, W_polytope.b)
@@ -85,7 +88,6 @@ def main():
     # Controller
     mpc = do_mpc.controller.MPC(model)
     setup_mpc = {
-        "n_robust": 0,
         "n_horizon": 10,
         "t_step": 0.1,
         "state_discretization": "collocation",
@@ -102,18 +104,31 @@ def main():
     }
 
     # mpc.settings.nlpsol_opts = opts
+    if use_disturbance:
+        # lower bounds of the states (x)
+        mpc.bounds["lower", "_x", "x"] = -np.array([b_x_t[1], b_x_t[3]])
 
-    # lower bounds of the states (x, xdot, y, ydot)
-    mpc.bounds["lower", "_x", "x"] = -np.array([b_x_t[1], b_x_t[3]])
+        # upper bounds of the states
+        mpc.bounds["upper", "_x", "x"] = np.array([b_x_t[0], b_x_t[2]])
 
-    # upper bounds of the states
-    mpc.bounds["upper", "_x", "x"] = np.array([b_x_t[0], b_x_t[2]])
+        # lower bounds of the input (u)
+        mpc.bounds["lower", "_u", "u"] = -np.array([b_u_t[0]])
 
-    # lower bounds of the input (u_x, u_y)
-    mpc.bounds["lower", "_u", "u"] = -np.array([b_u_t[0]])
+        # upper bounds of the input
+        mpc.bounds["upper", "_u", "u"] = np.array([b_u_t[1]])
+    
+    else:
+        # lower bounds of the states (x)
+        mpc.bounds["lower", "_x", "x"] = -np.array([b_x[1], b_x[3]])
 
-    # upper bounds of the input
-    mpc.bounds["upper", "_u", "u"] = np.array([b_u_t[1]])
+        # upper bounds of the states
+        mpc.bounds["upper", "_x", "x"] = np.array([b_x[0], b_x[2]])
+
+        # lower bounds of the input (u)
+        mpc.bounds["lower", "_u", "u"] = -np.array([b_u[0]])
+
+        # upper bounds of the input
+        mpc.bounds["upper", "_u", "u"] = np.array([b_u[1]])
 
     mpc.set_param(**setup_mpc)
 
@@ -132,40 +147,45 @@ def main():
     #     a_j = ca.DM(A_u_t[j]).T     # (1 x n_u)
     #     mpc.set_nl_cons(f'U_{j}', a_j @ model.u['u'], ub=float(b_u_t[j]))
 
-    lterm = x.T @ Q @ x
+    lterm = x.T @ Q @ x + u.T @ R @ u
     mterm = x.T @ P @ x
+    # mterm = ca.SX(0.0)
 
     mpc.settings.set_linear_solver(solver_name="ma57")
     mpc.set_objective(mterm=mterm, lterm=lterm)
-    mpc.set_rterm(ca.SX(R))
+    # mpc.set_rterm(ca.SX(R))
 
     mpc.setup()
 
-    # Generate the simulation model, which is a copy of the mpc model but with an added disturbance.
-    dist_model = do_mpc.model.Model(model_type)
+    if use_disturbance:
+        # Generate the simulation model with an added disturbance.
+        dist_model = do_mpc.model.Model(model_type)
 
-    _x = dist_model.set_variable(var_type="_x", var_name="x", shape=(2, 1))
-    _u = dist_model.set_variable(var_type="_u", var_name="u", shape=(1, 1))
+        _x = dist_model.set_variable(var_type="_x", var_name="x", shape=(2, 1))
+        _u = dist_model.set_variable(var_type="_u", var_name="u", shape=(1, 1))
 
-    # Set disturbance
-    _d = dist_model.set_variable(var_type="_p", var_name="d", shape=(2, 1))
+        # Set disturbance
+        _d = dist_model.set_variable(var_type="_p", var_name="d", shape=(2, 1))
 
-    x_dist_next = A @ _x + B @ _u + _d
+        x_dist_next = A @ _x + B @ _u + _d
 
-    dist_model.set_rhs("x", x_dist_next)
-    dist_model.setup()
+        dist_model.set_rhs("x", x_dist_next)
+        dist_model.setup()
 
-    simulator = do_mpc.simulator.Simulator(dist_model)
+        simulator = do_mpc.simulator.Simulator(dist_model)
 
-    d_template = simulator.get_p_template()
+        d_template = simulator.get_p_template()
 
-    def d_fun(t_now):
-        d_template["d"] = sample_from_disturbance(W_polytope)
-        return d_template
+        def d_fun(t_now):
+            d_template["d"] = sample_from_disturbance(W_polytope)
+            return d_template
 
-    simulator.set_p_fun(d_fun)
+        simulator.set_p_fun(d_fun)
+    else:
+        # Run the simulation without any disturbance.
+        simulator = do_mpc.simulator.Simulator(model)
 
-    simulator.set_param(t_step=0.5)
+    simulator.set_param(t_step=0.1)
     simulator.setup()
 
     # Seed
@@ -173,66 +193,75 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x, 1])
-    x0 = np.array([1.0, 0.2])
+    x0 = initial_state
     mpc.x0 = x0
     simulator.x0 = x0
 
     # Use initial state to set the initial guess.
     mpc.set_initial_guess()
 
-    for k in range(100):
+    for k in range(200):
         u0 = mpc.make_step(x0)
         x_nom0 = mpc.data.prediction(("_x", "x"))[:, 0]
         print("Predicted trajectory: ", mpc.data.prediction(("_x", "x")))
         x0_col = np.asarray(x0).reshape(-1, 1)
         x_nom0_col = np.asarray(x_nom0).reshape(-1, 1)
-        u_applied = u0 + K @ (x0_col - x_nom0_col)
+        if use_disturbance:
+            u_applied = u0 + K @ (x0_col - x_nom0_col)
+        else:
+            u_applied = u0
         y_next = simulator.make_step(u_applied)
         x0 = y_next
 
     X_pred = mpc.data.prediction(("_x", "x"))  # shape (n_x, horizon+1)
     U_pred = mpc.data.prediction(("_u", "u"))
 
+    # calculate total cost
+    total_cost = 0.0
+    for i in range(len(mpc.data._x)):
+        total_cost += mpc.data._x[i].T @ Q @ mpc.data._x[i] + mpc.data._u[i].T @ R @ mpc.data._u[i]
+    print("Total MPC cost: ", total_cost)
+
     # print("Min state constraint margin:", np.min(b_x_t - (A_x_t @ X_pred)))
     # print("Min input constraint margin:", np.min(b_u_t - (A_u_t @ U_pred)))
 
-    from matplotlib import rcParams
+    
+    if plot:
+        from matplotlib import rcParams
 
-    rcParams["axes.grid"] = True
-    rcParams["font.size"] = 18
+        rcParams["axes.grid"] = True
+        rcParams["font.size"] = 18
 
-    import matplotlib.pyplot as plt
+        import matplotlib.pyplot as plt
 
-    fig, ax, graphics = do_mpc.graphics.default_plot(mpc.data, figsize=(16, 9))
-    graphics.plot_results()
+        fig, ax, graphics = do_mpc.graphics.default_plot(mpc.data, figsize=(16, 9))
+        graphics.plot_results()
 
-    ub = mpc.bounds["upper", "_x", "x"]  # e.g. array([ub_0, ub_1, ...])
-    lb = mpc.bounds["lower", "_x", "x"]
+        ub = mpc.bounds["upper", "_x", "x"]  # e.g. array([ub_0, ub_1, ...])
+        lb = mpc.bounds["lower", "_x", "x"]
 
-    # normalize axes to a 1D list
-    ax_list = np.ravel(ax) if isinstance(ax, np.ndarray) else [ax]
+        # normalize axes to a 1D list
+        ax_list = np.ravel(ax) if isinstance(ax, np.ndarray) else [ax]
 
-    for i, (l, u) in enumerate(zip(np.atleast_1d(lb), np.atleast_1d(ub))):
-        if i < len(ax_list):
-            color = ax_list[0].get_lines()
-            color = color[i].get_color()
-            ax_list[0].axhline(y=float(u), color=color, linestyle="--", linewidth=1)
-            ax_list[0].axhline(y=float(l), color=color, linestyle="--", linewidth=1)
+        for i, (l, u) in enumerate(zip(np.atleast_1d(lb), np.atleast_1d(ub))):
+            if i < len(ax_list):
+                color = ax_list[0].get_lines()
+                color = color[i].get_color()
+                ax_list[0].axhline(y=float(u), color=color, linestyle="--", linewidth=1)
+                ax_list[0].axhline(y=float(l), color=color, linestyle="--", linewidth=1)
 
-    uub = mpc.bounds["upper", "_u", "u"]
-    ulb = mpc.bounds["lower", "_u", "u"]
+        uub = mpc.bounds["upper", "_u", "u"]
+        ulb = mpc.bounds["lower", "_u", "u"]
 
-    color = ax_list[0].get_lines()
-    color = color[0].get_color()
-    # ax_list[1].axhline(y=float(uub), color=color, linestyle="--", linewidth=1)
-    # ax_list[1].axhline(y=float(ulb), color=color, linestyle="--", linewidth=1)
+        color = ax_list[0].get_lines()
+        color = color[0].get_color()
+        # ax_list[1].axhline(y=float(uub), color=color, linestyle="--", linewidth=1)
+        # ax_list[1].axhline(y=float(ulb), color=color, linestyle="--", linewidth=1)
 
-    graphics.reset_axes()
-    plt.show()
+        graphics.reset_axes()
+        plt.show()
 
-    a = 5
-
-    return None
+    return mpc
 
 
 class Polyhedron:
@@ -547,4 +576,4 @@ def box_to_Ab(lower, upper):
 
 
 if __name__ == "__main__":
-    main()
+    main(use_disturbance=False)

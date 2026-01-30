@@ -165,14 +165,14 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x, 1])
-    x0 = np.array([-9, 8, 7, -2])
+    x0 = np.array([-9, 0, 7, 0])
     mpc.x0 = x0
     simulator.x0 = x0
 
     # Use initial state to set the initial guess.
     mpc.set_initial_guess()
 
-    for k in range(20):
+    for k in range(200):
         u0 = mpc.make_step(x0)
         x_nom0 = mpc.data.prediction(("_x", "x"))[:, 0]
         print("Predicted trajectory: ", mpc.data.prediction(("_x", "x")))

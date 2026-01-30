@@ -27,8 +27,8 @@ class RobustTubeMPC:
         self,
         horizon: int = 10,
         time_step: float = 0.1,
-        disturbance_bound: float = 0.1,
-        tube_radius: float = 0.05,
+        disturbance_bound: Optional[float] = None,
+        tube_radius: Optional[float] = None,
         A: Optional[np.ndarray] = None,
         B: Optional[np.ndarray] = None,
         Q: Optional[np.ndarray] = None,
@@ -38,6 +38,7 @@ class RobustTubeMPC:
         control_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         linearization_method: str = "finite_difference",
         finite_diff_eps: float = 1e-6,
+        initial_state: Optional[np.ndarray] = None,
     ):
         """Initialize Robust Tube MPC.
 
@@ -51,66 +52,94 @@ class RobustTubeMPC:
             Q: State cost matrix (if None, will be identity)
             R: Control cost matrix (if None, will be identity)
             disturbance_vertices: Vertices of disturbance distribution
-            control_bounds: Tuple of (lower_bound, upper_bound) for controls
+            state_bounds: Tuple of (lower_bound, upper_bound) for states. If None, assumes no constraints.
+            control_bounds: Tuple of (lower_bound, upper_bound) for controls. If None, assumes no constraints.
             linearization_method: Method for linearizing dynamics
             finite_diff_eps: Epsilon for finite difference linearization
         """
         self.horizon = horizon
         self.time_step = time_step
+
+        # Handle defaults for disturbance_bound and tube_radius if not given
         self.disturbance_bound = disturbance_bound
         self.tube_radius = tube_radius
+
+        # Ensure that A and B matrices are provided
+        if A is None or B is None:
+            raise ValueError("System dynamic matrices A and B must be provided.")
         self.A = A
         self.B = B
-        self.Q = Q
-        self.R = R
+
+        # Provide defaults for Q and R if they are not supplied
+        state_dim = np.shape(A)[1]
+        action_dim = np.shape(B)[1]
+        self.Q = Q if Q is not None else np.eye(state_dim)
+        self.R = R if R is not None else np.eye(action_dim)
+
         self.disturbance_vertices = disturbance_vertices
+
+        # Handle state and control bounds: if not provided, allow unconstrained, i.e., set to None
         self.state_bounds = state_bounds
         self.control_bounds = control_bounds
+
         self.linearization_method = linearization_method
         self.finite_diff_eps = finite_diff_eps
 
+        # Default initial state to zero if not given
+        self.initial_state = (
+            initial_state if initial_state is not None else np.zeros(state_dim)
+        )
+
         self.state_dim = np.shape(A)[1]
         self.action_dim = np.shape(B)[1]
+        self.xs = []
+        self.us = []
 
     def setup(self):
         """Initialize necessary objects for setting up MPC"""
         # ------------ PRELIMINARY SETS ------------- #
         # Solve for P, K matrices
         self.P = solve_discrete_are(self.A, self.B, self.Q, self.R)
-        self.K = -np.linalg.inv(self.B.T @ self.P @ self.B + self.R) @ (
-            self.B @ self.P @ self.A
-        )
 
-        # Closed loop
-        self.Ak = self.A + self.B @ self.K
-
-        # Set up disturbance polytope
-        self.disturbance_polytope = pytope.Polytope(self.disturbance_vertices)
-
-        # Compute mrpi set
-        self.A_F, self.b_F = compute_mrpi_hrep(
-            self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b
-        )
-        self.Z = pytope.Polytope(self.A_F, self.b_F)
-
-        # Tighten state and constraint bounds accordingly
-        if self.state_bounds is not None:
-            A_x_t, b_x_t = tighten_state_constraints(
-                self.state_bounds, self.A_F, self.b_F
+        if self.disturbance_bound is not None:
+            self.K = -np.linalg.inv(self.B.T @ self.P @ self.B + self.R) @ (
+                self.B @ self.P @ self.A
             )
-            self.A_x_t = A_x_t
-            self.b_x_t = b_x_t
 
-        if self.control_bounds is not None:
-            A_u_t, b_u_t = tighten_control_constraints(
-                self.control_bounds, self.K, self.A_F, self.b_F
+            # Closed loop
+            self.Ak = self.A + self.B @ self.K
+
+            # Set up disturbance polytope
+            self.disturbance_polytope = pytope.Polytope(self.disturbance_vertices)
+
+            # Compute mrpi set
+            self.A_F, self.b_F = compute_mrpi_hrep(
+                self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b
             )
-            self.A_u_t = A_u_t
-            self.b_u_t = b_u_t
+            self.Z = pytope.Polytope(self.A_F, self.b_F)
+
+            # Tighten state and constraint bounds accordingly
+            if self.state_bounds is not None:
+                A_x_t, b_x_t = tighten_state_constraints(
+                    self.state_bounds, self.A_F, self.b_F
+                )
+                self.A_x_t = A_x_t
+                self.b_x_t = b_x_t
+
+            if self.control_bounds is not None:
+                A_u_t, b_u_t = tighten_control_constraints(
+                    self.control_bounds, self.K, self.A_F, self.b_F
+                )
+                self.A_u_t = A_u_t
+                self.b_u_t = b_u_t
+        else:
+                self.A_x, self.b_x = box_to_Ab(self.state_bounds[0], self.state_bounds[1])
+                self.A_u, self.b_u = box_to_Ab(self.control_bounds[0], self.control_bounds[1])
+
 
         # ------------ UNDISTURBED MODEL SETUP ------------- #
         # for use in generating nominal control
-        model_type = "discrete"
+        model_type = "continuous"
         nominal_model = do_mpc.model.Model(model_type)
 
         _x = nominal_model.set_variable(
@@ -132,24 +161,37 @@ class RobustTubeMPC:
         setup_mpc = {
             "n_horizon": self.horizon,
             "t_step": self.time_step,
-            "state_dicretization": "discrete",
+            "state_dicretization": "collocation",
+            "collocation_type": "radau",
+            "collocation_deg": 3,
+            "collocation_ni": 1,
             "store_full_solution": True,
         }
 
-        # currently assumes all constraints are simple bounding boxes
-        if self.state_bounds is not None:
+        if self.disturbance_bound is not None:
             # lower bounds of the states
-            mpc.bounds["lower", "_x", "x"] = np.array([-b_x_t[1], -b_x_t[3]])
+            mpc.bounds["lower", "_x", "x"] = -np.array([self.b_x_t[1], self.b_x_t[3]])
 
             # upper bounds of the states
-            mpc.bounds["upper", "_x", "x"] = np.array([b_x_t[0], b_x_t[2]])
+            mpc.bounds["upper", "_x", "x"] = np.array([self.b_x_t[0], self.b_x_t[2]])
 
-        if self.control_bounds is not None:
             # lower bounds of the input
-            mpc.bounds["lower", "_u", "u"] = -np.array([b_u_t[0]])
+            mpc.bounds["lower", "_u", "u"] = -np.array([self.b_u_t[0]])
 
             # upper bounds of the input
-            mpc.bounds["upper", "_u", "u"] = np.array([b_u_t[1]])
+            mpc.bounds["upper", "_u", "u"] = np.array([self.b_u_t[1]])
+        else:
+            # lower bounds of the states
+            mpc.bounds["lower", "_x", "x"] = -np.array([self.b_x[1], self.b_x[3]])
+
+            # upper bounds of the states
+            mpc.bounds["upper", "_x", "x"] = np.array([self.b_x[0], self.b_x[2]])
+
+            # lower bounds of the input
+            mpc.bounds["lower", "_u", "u"] = -np.array([self.b_u[0]])
+
+            # upper bounds of the input
+            mpc.bounds["upper", "_u", "u"] = np.array([self.b_u[1]])
 
         mpc.set_param(**setup_mpc)
 
@@ -157,7 +199,7 @@ class RobustTubeMPC:
         x = nominal_model.x["x"]
         u = nominal_model.u["u"]
 
-        lterm = x.T @ self.Q @ x
+        lterm = x.T @ self.Q @ x + u.T @ self.R @ u
         mterm = x.T @ self.P @ x
 
         mpc.settings.set_linear_solver()
@@ -168,34 +210,39 @@ class RobustTubeMPC:
 
         self.mpc = mpc
 
-        # ------------ DISTURBED MODEL & SIMULATOR SETUP ------------- #
-        disturbed_model = do_mpc.model.Model(model_type)
+        if self.disturbance_bound is not None:
 
-        _xd = disturbed_model.set_variable(
-            var_type="_x", var_name="xd", shape=(self.state_dim, 1)
-        )
-        _ud = disturbed_model.set_variable(
-            var_type="_u", var_name="ud", shape=(self.action_dim, 1)
-        )
+            # ------------ DISTURBED MODEL & SIMULATOR SETUP ------------- #
+            disturbed_model = do_mpc.model.Model(model_type)
 
-        # Set disturbance
-        _d = disturbed_model.set_variable(
-            var_type="_p", var_name="d", shape=(self.state_dim, 1)
-        )
+            _xd = disturbed_model.set_variable(
+                var_type="_x", var_name="xd", shape=(self.state_dim, 1)
+            )
+            _ud = disturbed_model.set_variable(
+                var_type="_u", var_name="ud", shape=(self.action_dim, 1)
+            )
 
-        disturbed_x_next = self.A @ _xd + self.B @ _ud + _d
-        disturbed_model.set_rhs(disturbed_x_next)
-        disturbed_model.setup()
+            # Set disturbance
+            _d = disturbed_model.set_variable(
+                var_type="_p", var_name="d", shape=(self.state_dim, 1)
+            )
 
-        self.simulator = do_mpc.simulator.Simulator(disturbed_model)
+            disturbed_x_next = self.A @ _xd + self.B @ _ud + _d
+            disturbed_model.set_rhs(disturbed_x_next)
+            disturbed_model.setup()
 
-        d_template = self.simulator.get_p_template()
+            self.simulator = do_mpc.simulator.Simulator(disturbed_model)
 
-        def d_fun(t_now):
-            d_template["d"] = sample_from_disturbance(self.disturbance_polytope)
-            return d_template
+            d_template = self.simulator.get_p_template()
 
-        self.simulator.set_p_fun(d_fun)
+            def d_fun(t_now):
+                d_template["d"] = sample_from_disturbance(self.disturbance_polytope)
+                return d_template
+
+            self.simulator.set_p_fun(d_fun)
+        
+        else:
+            self.simulator = do_mpc.simulator.Simulator(nominal_model)
 
         self.simulator.set_param(t_step=self.time_step)
         self.simulator.setup()
@@ -205,55 +252,48 @@ class RobustTubeMPC:
         )
 
     def solve_mpc(
-        self, initial_state: np.ndarray, total_steps: int
+        self, state: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Solve MPC for given initial states across a finite time horizon
+        """Solve one MPC step given the current state.
 
         Args:
-            initial_state (np.ndarray): Initial state of system
-            total_steps (int): Time  horizon length
-
-        Raises:
-            ValueError: If attempting to run this method without having set MPC and Simulator objects
+            state (np.ndarray): Current state of the system.
 
         Returns:
-            Tuple[np.ndarray, np.ndarray]: states, controls for each timestep
+            Tuple[np.ndarray, np.ndarray]: Tuple of (next_state, applied_control).
         """
-        if not self.mpc or self.simulator:
+        if self.mpc is None or self.simulator is None:
             raise ValueError(
                 "Must set MPC and Simulator objects before attempting to solve"
             )
 
-        x0 = initial_state
-        self.mpc.x0 = x0
-        self.simulator.x0 = x0
+        # Set initial state for MPC and simulator
+        self.mpc.x0 = state
+        self.simulator.x0 = state
         self.mpc.set_initial_guess()
 
-        xs = []
-        us = []
+        # Compute nominal optimal control from MPC
+        u_nom = self.mpc.make_step(state)
+        
+        # Predict nominal state (first predicted state in the horizon)
+        nominal_state = self.mpc.data.prediction(("_x", "x"))[:, 0]
 
-        for k in range(total_steps):
-            xs.append(x0)
+        # Convert to column vectors for disturbance rejection control law
+        state_col = np.asarray(state).reshape(-1, 1)
+        nominal_col = np.asarray(nominal_state).reshape(-1, 1)
 
-            u0 = self.mpc.make_step(x0)
-            nominal_x0 = self.mpc.data.prediction(("_x", "x"))[:, 0]
-            u_applied = u0 + self.K @ (
-                x0.T.reshape(
-                    -1,
-                )
-                - nominal_x0.reshape(
-                    -1,
-                )
-            )
-            y_next = self.simulator.make_step(u_applied)
-            x0 = y_next
+        if self.disturbance_bound is not None:
+            applied_u = u_nom + self.K @ (state_col - nominal_col)
+        else:
+            applied_u = u_nom
 
-            us.append(u_applied)
+        # Simulate the next state using the simulator
+        next_state = self.simulator.make_step(u0=applied_u)
 
-        self.xs = xs
-        self.us = us
+        self.xs.append(state)
+        self.us.append(applied_u)
 
-        return xs, us
+        return next_state, applied_u.flatten()
 
     def augment_trajectory(
         self,

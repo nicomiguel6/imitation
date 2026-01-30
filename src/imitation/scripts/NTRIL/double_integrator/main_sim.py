@@ -34,6 +34,7 @@ from imitation.rewards.reward_wrapper import RewardVecEnvWrapper
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
 
+
 import matplotlib.pyplot as plt
 
 
@@ -143,10 +144,11 @@ def generate_expert_demonstrations(
         )
 
         # Train the policy
-        expert_policy = PPO("MlpPolicy", venv, verbose=1, device=device)
+        expert_policy = PPO("MlpPolicy", venv, verbose=1, device=device, tensorboard_log=str(CHECKPOINTS_DIR / "ppo_logs"))
         expert_policy.learn(
             total_timesteps=train_timesteps,
             callback=checkpoint_callback,
+            progress_bar=True,
         )
 
         # Save final model
@@ -392,14 +394,14 @@ def plot_noisy_rollouts(noise_level, noisy_rollouts, max_rollouts_per_level: int
     print("Plotting noisy rollouts...")
     fig, ax = plt.subplots()
     for traj in noisy_rollouts[:max_rollouts_per_level]:
-        ax.plot(traj.obs[:, 0], traj.obs[:, 2], label=f"Noise {noise_level}")
-        ax.plot(traj.obs[0, 0], traj.obs[0, 2], "b+", label="Initial Position")
-        ax.plot(traj.obs[-1, 0], traj.obs[-1, 2], "g+", label="Final Position")
+        ax.plot(traj.obs[:, 0], traj.obs[:, 1], label=f"Noise {noise_level}")
+        ax.plot(traj.obs[0, 0], traj.obs[0, 1], "b+", label="Initial State")
+        ax.plot(traj.obs[-1, 0], traj.obs[-1, 1], "g+", label="Final State")
+        ax.grid(True)
+        ax.set_xlabel("Position")
+        ax.set_ylabel("Velocity")
     ax.legend()
-    ax.plot(0, 0, "ro", label="Target Position")
-    ax.set_xlabel("X Position")
-    ax.set_ylabel("Y Position")
-    ax.set_title(f"Noisy Rollouts at Noise Level {noise_level}")
+    ax.set_title(f"Phase Portrait of Noisy Rollouts at Noise Level {noise_level:.2f}")
     plt.savefig(f"debug/plots/noisy_rollouts_{noise_level}.png")
     plt.close()
 
@@ -479,15 +481,17 @@ def main():
     print(f"\nEnvironment: {env_id}")
 
     # Step 1: Generate demonstrations (suboptimal)
+    checkpoint_interval = 500_000
     desired_steps = 1_000_000
+    train_timesteps = 1_100_000
     demonstrations = generate_expert_demonstrations(
         env_id=env_id,
         device=str(device),
         n_episodes=20,
-        train_timesteps=1_100_000,  # Train fully
-        checkpoint_interval=1_000_000,  # Save every 10k steps
+        train_timesteps=train_timesteps,  # Train fully
+        checkpoint_interval=checkpoint_interval,  # Save every 10k steps
         use_checkpoint_at=desired_steps,  # Use 30% trained policy (SUBOPTIMAL!)
-        force_retrain=False,
+        force_retrain=True,
     )
 
     # Step 1.5: Collect reward statistics on suboptimal demonstrations
@@ -497,32 +501,32 @@ def main():
     print(f"  Mean return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
     print(f"  Mean length: {np.mean(lengths):.2f} ± {np.std(lengths):.2f}")
 
-    # Step 2: Set up robust tube MPC
-    robust_tube_mpc = RobustTubeMPC(
-        horizon = 10,
-        time_step = 0.1,
-        disturbance_bound = 0.1,
-        tube_radius = 0.05,
-        A = np.array([[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]]),
-        B = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]]),
-        Q = np.eye(4),
-        R = np.eye(2),
-        disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1]]),
-    )
+    # # Step 2: Set up robust tube MPC
+    # robust_tube_mpc = RobustTubeMPC(
+    #     horizon = 10,
+    #     time_step = 0.1,
+    #     disturbance_bound = 0.1,
+    #     tube_radius = 0.05,
+    #     A = np.array([[0.0, 1.0], [0.0, 0.0]]),
+    #     B = np.array([[0.0], [1.0]]),
+    #     Q = np.eye(2),
+    #     R = np.eye(1),
+    #     disturbance_vertices = np.array([[0.1], [-0.1]]),
+    # )
 
 
-    # Step 2: Run NTRIL training on suboptimal demos
-    ntril_trainer = run_ntril_training(
-        demonstrations=demonstrations,
-        env_id=env_id,
-        save_dir=str(SAVE_DIR),
-        noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
-        n_rollouts_per_noise=10,
-        bc_epochs=50,
-        rl_total_timesteps=100_000,
-        run_individual_steps=[1, 2],  # Change to None to run full training
-        just_plot_noisy_rollouts=False,
-    )
+    # # Step 2: Run NTRIL training on suboptimal demos
+    # ntril_trainer = run_ntril_training(
+    #     demonstrations=demonstrations,
+    #     env_id=env_id,
+    #     save_dir=str(SAVE_DIR),
+    #     noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
+    #     n_rollouts_per_noise=10,
+    #     bc_epochs=50,
+    #     rl_total_timesteps=100_000,
+    #     run_individual_steps=[1, 2],  # Change to None to run full training
+    #     just_plot_noisy_rollouts=False,
+    # )
 
 
     # # Step 3: Evaluate the trained policy
