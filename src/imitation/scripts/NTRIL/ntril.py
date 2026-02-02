@@ -3,6 +3,7 @@
 import abc
 import dataclasses
 import json
+import pickle
 import logging
 import os
 from datetime import datetime
@@ -37,6 +38,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     venv: vec_env.VecEnv
 
     custom_logger: Optional[imit_logger.HierarchicalLogger] = None
+    bc_policy: Optional[policies.BasePolicy] = None # If we already have a BC policy that we want to use as the initial policy, we can pass it here.
     # Training configuration
     noise_levels: Sequence[float] = dataclasses.field(
         default_factory=lambda: (0.0, 0.1, 0.2, 0.3, 0.4, 0.5)
@@ -102,7 +104,6 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         self.reward_net.to(device)
         
         # Storage for training artifacts
-        object.__setattr__(self, 'bc_policy', None)
         object.__setattr__(self, 'noisy_rollouts', [])
         object.__setattr__(self, 'augmented_data', [])
         object.__setattr__(self, 'ranked_dataset', None)
@@ -250,6 +251,11 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         metadata_path = os.path.join(noisy_policies_dir, "noisy_policies.json")
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(noisy_policies_metadata, f, indent=2)
+        
+        # Save noisy rollouts to file
+        noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
+        with open(noisy_rollouts_path, "wb") as f:
+            pickle.dump(self.noisy_rollouts, f)
 
         plot_path = os.path.join(self.save_dir, "noise_levels_visualization.png")
 
@@ -264,7 +270,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         plt.savefig(plot_path)
         plt.close()
 
-        return {
+        return self.noisy_rollouts, {
             "total_rollouts": total_rollouts,
             "noise_levels": list(self.noise_levels),
             "rollouts_per_level": [len(rollouts) for rollouts in self.noisy_rollouts],
@@ -281,7 +287,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             for traj in rollouts:
                 # Apply robust tube MPC to each trajectory
                 augmented_transitions = self.robust_mpc.augment_trajectory(
-                    traj, noise_level=noise_level
+                    traj
                 )
                 self.augmented_data.append(augmented_transitions)
                 total_augmented_transitions += len(augmented_transitions.obs)
@@ -358,7 +364,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     @robust_mpc.setter
     def robust_mpc(self, robust_mpc: RobustTubeMPC):
         """Function to catch external Robust Tube MPC. Main file running the trainer should set up the robust tube MPC and then pass it here."""
-        self.robust_mpc = robust_mpc
+        self._robust_mpc = robust_mpc
 
     @property
     def policy(self) -> policies.BasePolicy:

@@ -3,6 +3,7 @@
 import abc
 from typing import Any, Dict, List, Optional, Tuple, Union, Sequence
 
+import gymnasium as gym
 import numpy as np
 import torch as th
 from scipy.optimize import minimize
@@ -13,6 +14,7 @@ import cdd
 import pytope
 
 from imitation.data import types
+from imitation.policies.base import NonTrainablePolicy
 from imitation.util import util
 
 
@@ -202,7 +204,8 @@ class RobustTubeMPC:
         lterm = x.T @ self.Q @ x + u.T @ self.R @ u
         mterm = x.T @ self.P @ x
 
-        mpc.settings.set_linear_solver()
+        mpc.settings.set_linear_solver("ma57")
+        mpc.settings.supress_ipopt_output()
         mpc.set_objective(mterm=mterm, lterm=lterm)
         mpc.set_rterm(ca.SX(self.R))
 
@@ -455,6 +458,127 @@ class RobustTubeMPC:
                 min_margin = margin
 
         return min_margin
+
+
+class RobustTubeMPCPolicy(NonTrainablePolicy):
+    """Policy wrapper that exposes RobustTubeMPC as a BasePolicy."""
+
+    def __init__(
+        self,
+        observation_space: gym.Space,
+        action_space: gym.Space,
+        *,
+        auto_setup: bool = True,
+        **mpc_kwargs: Any,
+    ):
+        """Builds a BasePolicy-compatible wrapper around RobustTubeMPC."""
+        super().__init__(observation_space=observation_space, action_space=action_space)
+        self._auto_setup = auto_setup
+        self._mpc_kwargs = mpc_kwargs
+        self._controllers: List[RobustTubeMPC] = []
+
+    def _build_controller(self) -> RobustTubeMPC:
+        controller = RobustTubeMPC(**self._mpc_kwargs)
+        if self._auto_setup:
+            controller.setup()
+        return controller
+
+    def _ensure_controllers(self, n_envs: int) -> None:
+        if not self._controllers or len(self._controllers) != n_envs:
+            self._controllers = [self._build_controller() for _ in range(n_envs)]
+
+    def reset(
+        self,
+        *,
+        env_index: Optional[int] = None,
+        initial_state: Optional[np.ndarray] = None,
+    ) -> None:
+        """Reset controller state for one or all environments."""
+        if not self._controllers:
+            return
+        if env_index is None:
+            controllers = self._controllers
+        else:
+            controllers = [self._controllers[env_index]]
+
+        for controller in controllers:
+            controller.xs = []
+            controller.us = []
+            if initial_state is not None:
+                controller.initial_state = np.asarray(initial_state)
+
+    def _clip_action(self, action: np.ndarray) -> np.ndarray:
+        if isinstance(self.action_space, gym.spaces.Box):
+            return np.clip(action, self.action_space.low, self.action_space.high)
+        return action
+
+    def _maybe_batch_obs(
+        self, observation: Union[np.ndarray, Dict[str, np.ndarray], th.Tensor, Dict[str, th.Tensor]]
+    ) -> Union[np.ndarray, types.DictObs]:
+        if isinstance(observation, dict):
+            if not isinstance(self.observation_space, gym.spaces.Dict):
+                raise ValueError("Dictionary observation provided for non-dict space.")
+            batched: Dict[str, np.ndarray] = {}
+            for key, value in observation.items():
+                if isinstance(value, th.Tensor):
+                    arr = value.detach().cpu().numpy()
+                else:
+                    arr = np.asarray(value)
+                space_shape = self.observation_space.spaces[key].shape
+                if arr.shape == space_shape:
+                    arr = arr[None, ...]
+                batched[key] = arr
+            return types.DictObs(batched)
+
+        if isinstance(observation, th.Tensor):
+            arr = observation.detach().cpu().numpy()
+        else:
+            arr = np.asarray(observation)
+        if arr.shape == self.observation_space.shape:
+            arr = arr[None, ...]
+        return arr
+
+    def _choose_action(
+        self,
+        obs: Union[np.ndarray, Dict[str, np.ndarray]],
+    ) -> np.ndarray:
+        self._ensure_controllers(1)
+        obs_array = types.maybe_unwrap_dictobs(obs)
+        _, action = self._controllers[0].solve_mpc(np.asarray(obs_array))
+        return self._clip_action(action)
+
+    def predict(  # type: ignore[override]
+        self,
+        observation: Union[np.ndarray, Dict[str, np.ndarray], th.Tensor, Dict[str, th.Tensor]],
+        state: Optional[Tuple[np.ndarray, ...]] = None,
+        episode_start: Optional[np.ndarray] = None,
+        deterministic: bool = False,
+    ) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:
+        batched_obs = self._maybe_batch_obs(observation)
+        n_envs = len(batched_obs)
+        self._ensure_controllers(n_envs)
+
+        if episode_start is not None:
+            episode_start = np.asarray(episode_start, dtype=bool)
+            if episode_start.shape[0] != n_envs:
+                raise ValueError(
+                    f"episode_start has length {episode_start.shape[0]} but expected {n_envs}",
+                )
+
+        actions: List[np.ndarray] = []
+        for env_idx, obs in enumerate(batched_obs):
+            obs_unwrapped = types.maybe_unwrap_dictobs(obs)
+            if episode_start is not None and episode_start[env_idx]:
+                self.reset(env_index=env_idx, initial_state=obs_unwrapped)
+            _, action = self._controllers[env_idx].solve_mpc(np.asarray(obs_unwrapped))
+            action = self._clip_action(action)
+            if not self.action_space.contains(action):
+                raise ValueError(
+                    f"Action {action} is not in action space {self.action_space}",
+                )
+            actions.append(action)
+
+        return np.stack(actions, axis=0), state
 
 
 def tighten_state_constraints(

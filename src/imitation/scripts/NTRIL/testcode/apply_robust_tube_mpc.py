@@ -87,6 +87,7 @@ def main(use_disturbance=False, initial_state=None, plot=False) -> do_mpc.contro
 
     # Controller
     mpc = do_mpc.controller.MPC(model)
+    mpc.settings.supress_ipopt_output()
     setup_mpc = {
         "n_horizon": 10,
         "t_step": 0.1,
@@ -97,11 +98,11 @@ def main(use_disturbance=False, initial_state=None, plot=False) -> do_mpc.contro
         "store_full_solution": True,
     }
 
-    opts = {
-        "ipopt.linear_solver": "ma57",
-        #"ipopt.hsllib": "/usr/local/lib/libcoinhsl.dylib",
-        "ipopt.print_level": 5,
-    }
+    # opts = {
+    #     "ipopt.linear_solver": "ma57",
+    #     #"ipopt.hsllib": "/usr/local/lib/libcoinhsl.dylib",
+    #     "ipopt.print_level": 5,
+    # }
 
     # mpc.settings.nlpsol_opts = opts
     if use_disturbance:

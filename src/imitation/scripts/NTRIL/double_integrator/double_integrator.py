@@ -205,9 +205,9 @@ class DoubleIntegratorEnv(gym.Env):
         
         # Add terminal cost given by D.Algebraic Riccati Equation (ARE) 
         truncated = self.step_count >= self.max_episode_steps
-        # if truncated:
-        #     terminal_cost = self.state.T @ self.P @ self.state
-        #     reward -= terminal_cost.item()
+        if truncated:
+            terminal_cost = self.state.T @ self.P @ self.state
+            reward -= terminal_cost.item()
 
         reward = reward.astype(np.float32)
         # Ensure returned state is float32

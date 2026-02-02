@@ -16,13 +16,15 @@ Date: December 2025
 import os
 from pathlib import Path
 import functools
-from typing import Optional
+import pickle
+from typing import Optional, List, Sequence
 
 import numpy as np
 import torch as th
 import gymnasium as gym
 import dataclasses
 from stable_baselines3 import PPO
+import tqdm
 
 from imitation.algorithms import bc
 from imitation.data import rollout, serialize
@@ -32,10 +34,177 @@ from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.rewards.reward_nets import BasicRewardNet
 from imitation.rewards.reward_wrapper import RewardVecEnvWrapper
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
-from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
+from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC, RobustTubeMPCPolicy
+from imitation.data.types import TrajectoryWithRew
+from imitation.data.types import Trajectory
 
 
 import matplotlib.pyplot as plt
+
+
+
+def generate_MPC_demonstrations(
+    env_id: str = "DoubleIntegrator-v0",
+    device: str = "cuda",
+    n_episodes: int = 20,
+    train_timesteps: int = 10_000_000,
+    checkpoint_interval: int = 1_000_000,
+    use_checkpoint_at: Optional[int] = None,
+    force_retrain: bool = False,
+):
+    """Generate demonstrations using MPC."""
+    print("\n" + "=" * 70)
+    print("STEP 1: Generating MPC Demonstrations")
+    print("=" * 70)
+
+    # Get the directory where THIS script is located
+    SCRIPT_DIR = Path(__file__).parent.resolve()
+
+    # Define all paths relative to script directory
+    DEBUG_DIR = SCRIPT_DIR / "debug"
+    CHECKPOINTS_DIR = DEBUG_DIR / "policy_checkpoints"
+    DEMOS_DIR = DEBUG_DIR / "demonstrations"
+
+    DEMO_PATH = DEMOS_DIR / "mpc_demonstrations.pkl"
+    # Create directories
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    DEMOS_DIR.mkdir(parents=True, exist_ok=True)
+
+    ## return if demonstrations already exist
+    if DEMO_PATH.exists() and not force_retrain:
+        print(f"✓ Found existing MPC demonstrations at {DEMOS_DIR / 'mpc_demonstrations.pkl'}")
+        mpc_trajectories = serialize.load(str(DEMO_PATH))
+        return mpc_trajectories
+    else:
+        print(f"⚠ No existing MPC demonstrations found at {DEMO_PATH}")
+
+    env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
+    mpc_policy = RobustTubeMPC(
+        horizon=10,
+        time_step=0.1,
+        A=np.array([[0.0, 1.0], [0.0, 0.0]]),
+        B=np.array([[0.0], [1.0]]),
+        Q=np.diag([10.0, 1.0]),
+        R=0.01*np.eye(1),
+        state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
+        control_bounds=(np.array([-50.0]), np.array([50.0])))
+    mpc_policy.setup()
+    rng = np.random.default_rng()
+
+    # Setup TrajectoryWithRew Types
+    # mpc_trajectories = rollout.rollout(
+    #     mpc_policy,
+    #     venv,
+    #     rollout.make_sample_until(min_episodes=10),
+    #     rng=rng,
+    #     exclude_infos=False,
+    # )
+    mpc_trajectories = []
+    builder = util.TrajectoryBuilder()
+    for j in tqdm.tqdm(range(n_episodes), desc="Generating MPC Demonstrations"):
+        obs, _ = env_mpc.reset()
+        builder.start_episode(initial_obs=obs)
+        for t in range(200):
+            _, action = mpc_policy.solve_mpc(obs)
+            next_obs, reward, _, _, info = env_mpc.step(action)
+            builder.add_step(action=action, next_obs=next_obs, reward=reward, info=info)
+            obs = next_obs
+        mpc_trajectories.append(builder.finish(terminal=True))
+
+    serialize.save(str(DEMOS_DIR / "mpc_demonstrations.pkl"), mpc_trajectories)
+    print(f"✓ Saved MPC demonstrations to {DEMOS_DIR / 'mpc_demonstrations.pkl'}")
+    env_mpc.close()
+
+    return mpc_trajectories
+
+def train_BC_on_MPC_demonstrations(
+    demonstrations: List[TrajectoryWithRew],
+    env_id: str = "DoubleIntegrator-v0",
+    device: str = "cuda",
+    n_episodes: int = 200,
+    train_timesteps: int = 10_000_000,
+    checkpoint_interval: int = 1_000_000,
+    use_checkpoint_at: Optional[int] = None,
+    force_retrain: bool = False,
+):
+    """Train BC policy on MPC demonstrations."""
+    print("\n" + "=" * 70)
+    print("STEP 2: Training BC Policy on MPC Demonstrations")
+    print("=" * 70)
+
+    # Get the directory where THIS script is located
+    SCRIPT_DIR = Path(__file__).parent.resolve()
+
+    # Define all paths relative to script directory
+    DEBUG_DIR = SCRIPT_DIR / "debug"
+    CHECKPOINTS_DIR = DEBUG_DIR / "policy_checkpoints"
+    DEMOS_DIR = DEBUG_DIR / "demonstrations"
+
+    # Setup logger
+    custom_logger = imit_logger.configure(
+        folder=os.path.join(DEBUG_DIR, "logs"),
+        format_strs=["stdout", "tensorboard", "csv"],
+    )
+
+    rng = np.random.default_rng(42)
+
+    venv = util.make_vec_env(
+        env_id,
+        rng=rng,
+        n_envs=8,
+        post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
+    )
+
+    # Check if BC policy already exists
+    BC_POLICY_PATH = CHECKPOINTS_DIR / "bc_mpc_policy.pkl"
+    if BC_POLICY_PATH.exists() and not force_retrain:
+        # Set up BC policy
+        print(f"✓ Found existing BC policy at {BC_POLICY_PATH}")
+        bc_policy_temp = bc.reconstruct_policy(str(BC_POLICY_PATH), device=device)
+        bc_policy = bc.BC(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+            rng=rng,
+            demonstrations=demonstrations,
+            policy=bc_policy_temp,
+            device=device,
+            custom_logger=custom_logger,
+        )
+        print(f"✓ Loaded existing BC policy from {BC_POLICY_PATH}")
+    else:
+        print(f"⚠ No existing BC policy found at {BC_POLICY_PATH}")
+        print("  Training new BC policy...")
+        bc_policy = bc.BC(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+            rng=rng,
+            demonstrations=demonstrations,
+            device=device,
+            custom_logger=custom_logger,
+        )
+        bc_policy.train(n_epochs=50, progress_bar=True)
+        print(f"✓ Trained new BC policy and saved to {BC_POLICY_PATH}")
+        util.save_policy(bc_policy.policy, BC_POLICY_PATH)
+
+    # check if demonstrations already exist
+    DEMO_PATH = DEMOS_DIR / "bc_mpc_demonstrations.pkl"
+    if DEMO_PATH.exists():
+        print(f"✓ Found existing BC MPC demonstrations at {DEMO_PATH}")
+        demonstrations = serialize.load(str(DEMO_PATH))
+    else:
+        print(f"⚠ No existing BC MPC demonstrations found at {DEMO_PATH}")
+        demonstrations = rollout.rollout(
+            bc_policy.policy,
+            venv,
+            rollout.make_sample_until(min_episodes=n_episodes),
+            rng=rng,
+        )
+        serialize.save(str(DEMO_PATH), demonstrations)
+        print(f"✓ Saved BC MPC demonstrations to {DEMO_PATH}")
+        venv.close()
+
+    return bc_policy, demonstrations
 
 
 def generate_expert_demonstrations(
@@ -221,6 +390,9 @@ def run_ntril_training(
     rl_total_timesteps: int = 100000,
     run_individual_steps: Optional[list] = None,
     just_plot_noisy_rollouts: bool = False,
+    bc_policy: Optional[bc.BC] = None,
+    noisy_rollouts: Optional[Sequence[Trajectory]] = None,
+    robust_mpc: Optional[RobustTubeMPC] = None,
 ):
     """Run NTRIL training using the NTRILTrainer class.
 
@@ -234,6 +406,8 @@ def run_ntril_training(
         rl_total_timesteps: Total timesteps for final RL training
         run_individual_steps: List of steps to run individually
         just_plot_noisy_rollouts: Whether to just plot noisy rollouts (warning, this will override run_individual_steps)
+        bc_policy: Optional pre-trained BC policy (needed for steps 2+)
+        robust_mpc: Optional robust MPC instance (needed for step 3)
 
     Returns:
         Trained NTRILTrainer instance
@@ -281,6 +455,12 @@ def run_ntril_training(
         irl_lr=1e-3,
         save_dir=save_dir,
     )
+    a = 5 # just to test if the bc policy is being set
+    
+    if bc_policy is not None:
+        ntril_trainer.bc_policy = bc_policy.policy
+    if robust_mpc is not None:
+        ntril_trainer.robust_mpc = robust_mpc
 
     # Run training
     irl_train_kwargs = {}
@@ -330,7 +510,7 @@ def run_ntril_training(
             print(f"Running Step {step_num}")
             print(f"{'='*60}")
 
-            if step_num == 1:
+            if step_num == 1: # Trains BC policy from suboptimal expert demonstrations
                 print("Step 1: Training BC policy from demonstrations...")
                 bc_stats = ntril_trainer._train_bc_policy(
                     n_epochs=bc_epochs, progress_bar=True
@@ -340,7 +520,10 @@ def run_ntril_training(
                 for key, value in bc_stats.items():
                     print(f"  {key}: {value}")
 
-            elif step_num == 2:
+            elif step_num == 2: # Generates noisy rollouts from BC policy
+                # Check if bc policy is provided
+                if bc_policy is None:
+                    raise ValueError("BC policy is required for step 2")
                 print("Step 2: Generating noisy rollouts...")
                 rollout_stats = ntril_trainer._generate_noisy_rollouts()
                 step_results["rollouts"] = rollout_stats
@@ -348,19 +531,33 @@ def run_ntril_training(
                     f"\nGenerated rollouts for {len(ntril_trainer.noise_levels)} noise levels"
                 )
 
-            elif step_num == 3:
+            elif step_num == 3: # Applies robust tube MPC to augment data
+                # Check if robust MPC is provided
+                if robust_mpc is None:
+                    raise ValueError("Robust MPC is required for step 3")
+                if ntril_trainer.noisy_rollouts is None:
+                    raise ValueError("Noisy rollouts are required for step 3")
+                # check if noisy rollouts are available at save location
+                noisy_rollouts_path = os.path.join(save_dir, "noisy_rollouts.pkl")
+                if os.path.exists(noisy_rollouts_path):
+                    with open(noisy_rollouts_path, "rb") as f:
+                        noisy_rollouts = pickle.load(f)
+                else:
+                    raise ValueError(f"Noisy rollouts not found at {noisy_rollouts_path}")
+                ntril_trainer.noisy_rollouts = noisy_rollouts
                 print("Step 3: Augmenting data with robust tube MPC...")
+
                 augmentation_stats = ntril_trainer._augment_data_with_mpc()
                 step_results["augmentation"] = augmentation_stats
                 print("\nData augmentation complete")
 
-            elif step_num == 4:
+            elif step_num == 4: # Builds ranked dataset
                 print("Step 4: Building ranked dataset...")
                 ranking_stats = ntril_trainer._build_ranked_dataset()
                 step_results["ranking"] = ranking_stats
                 print("\nRanked dataset built")
 
-            elif step_num == 5:
+            elif step_num == 5: # Trains reward network using demonstration ranked IRL
                 print(
                     "Step 5: Training reward network with demonstration ranked IRL..."
                 )
@@ -370,7 +567,7 @@ def run_ntril_training(
                 step_results["irl"] = irl_stats
                 print("\nIRL training complete")
 
-            elif step_num == 6:
+            elif step_num == 6: # Trains final policy using learned reward
                 print("Step 6: Training final policy using learned reward...")
                 rl_stats = ntril_trainer._train_final_policy(
                     total_timesteps=rl_total_timesteps, **(rl_train_kwargs or {})
@@ -480,19 +677,38 @@ def main():
     print("=" * 70)
     print(f"\nEnvironment: {env_id}")
 
-    # Step 1: Generate demonstrations (suboptimal)
-    checkpoint_interval = 500_000
-    desired_steps = 1_000_000
-    train_timesteps = 1_100_000
-    demonstrations = generate_expert_demonstrations(
+    # Step 1a: Generate MPC demonstrations
+    mpc_demonstrations = generate_MPC_demonstrations(
         env_id=env_id,
         device=str(device),
-        n_episodes=20,
-        train_timesteps=train_timesteps,  # Train fully
-        checkpoint_interval=checkpoint_interval,  # Save every 10k steps
-        use_checkpoint_at=desired_steps,  # Use 30% trained policy (SUBOPTIMAL!)
-        force_retrain=True,
+        n_episodes=200,
     )
+
+    # Step 1b: Train BC policy on MPC demonstrations, rollout policy
+    bc_policy, demonstrations = train_BC_on_MPC_demonstrations(
+        demonstrations=mpc_demonstrations,
+        env_id=env_id,
+        device=str(device),
+        force_retrain=False,
+    )
+
+    '''The use of BC for the MPC demonstrations is not necessary, but it is a good way to get a policy that is close to the MPC policy. 
+    Clearly, Actor Critic PPO on the Double Integrator Environment is harder to train to get an expert policy in. 
+    Now, we have an "expert policy" that is close to the MPC policy. Now, we need a way to make it suboptimal to represent the true suboptimal policy'''
+
+    # # Step 1: Generate demonstrations (suboptimal)
+    # checkpoint_interval = 1_900_000
+    # desired_steps = 1_900_000
+    # train_timesteps = 2_000_000
+    # demonstrations = generate_expert_demonstrations(
+    #     env_id=env_id,
+    #     device=str(device),
+    #     n_episodes=20,
+    #     train_timesteps=train_timesteps,  # Train fully
+    #     checkpoint_interval=checkpoint_interval,  # Save every 10k steps
+    #     use_checkpoint_at=desired_steps,  # Use 30% trained policy (SUBOPTIMAL!)
+    #     force_retrain=True,
+    # )
 
     # Step 1.5: Collect reward statistics on suboptimal demonstrations
     print("\nCollecting reward statistics on suboptimal demonstrations...")
@@ -501,32 +717,34 @@ def main():
     print(f"  Mean return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
     print(f"  Mean length: {np.mean(lengths):.2f} ± {np.std(lengths):.2f}")
 
-    # # Step 2: Set up robust tube MPC
-    # robust_tube_mpc = RobustTubeMPC(
-    #     horizon = 10,
-    #     time_step = 0.1,
-    #     disturbance_bound = 0.1,
-    #     tube_radius = 0.05,
-    #     A = np.array([[0.0, 1.0], [0.0, 0.0]]),
-    #     B = np.array([[0.0], [1.0]]),
-    #     Q = np.eye(2),
-    #     R = np.eye(1),
-    #     disturbance_vertices = np.array([[0.1], [-0.1]]),
-    # )
+    # Step 2: Set up robust tube MPC
+    robust_tube_mpc = RobustTubeMPC(
+        horizon = 10,
+        time_step = 0.1,
+        disturbance_bound = 0.1,
+        tube_radius = 0.05,
+        A = np.array([[0.0, 1.0], [0.0, 0.0]]),
+        B = np.array([[0.0], [1.0]]),
+        Q = np.eye(2),
+        R = np.eye(1),
+        disturbance_vertices = np.array([[0.1], [-0.1]]),
+    )
 
 
-    # # Step 2: Run NTRIL training on suboptimal demos
-    # ntril_trainer = run_ntril_training(
-    #     demonstrations=demonstrations,
-    #     env_id=env_id,
-    #     save_dir=str(SAVE_DIR),
-    #     noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
-    #     n_rollouts_per_noise=10,
-    #     bc_epochs=50,
-    #     rl_total_timesteps=100_000,
-    #     run_individual_steps=[1, 2],  # Change to None to run full training
-    #     just_plot_noisy_rollouts=False,
-    # )
+    # Step 2: Run NTRIL training (Choose step 3 to test sample augmentation)
+    ntril_trainer = run_ntril_training(
+        demonstrations=demonstrations,
+        env_id=env_id,
+        save_dir=str(SAVE_DIR),
+        noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
+        n_rollouts_per_noise=10,
+        bc_epochs=50,
+        rl_total_timesteps=100_000,
+        run_individual_steps=[3],  # Change to None to run full training
+        just_plot_noisy_rollouts=False,
+        bc_policy=bc_policy,
+        robust_mpc=robust_tube_mpc,
+    )
 
 
     # # Step 3: Evaluate the trained policy

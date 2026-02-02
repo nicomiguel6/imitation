@@ -24,7 +24,7 @@ from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.rewards.reward_nets import BasicRewardNet
 from imitation.rewards.reward_wrapper import RewardVecEnvWrapper
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
-from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
+from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC, RobustTubeMPCPolicy
 
 from imitation.scripts.NTRIL.testcode.apply_robust_tube_mpc import main as apply_robust_tube_mpc
 
@@ -76,9 +76,13 @@ if __name__ == "__main__":
     DEBUG_DIR = SCRIPT_DIR / "debug"
     CHECKPOINTS_DIR = DEBUG_DIR / "policy_checkpoints"
     DEMOS_DIR = DEBUG_DIR / "demonstrations"
+    MPC_DEMOS_DIR = DEMOS_DIR / "mpc_demonstrations.pkl"
+    BC_DEMOS_DIR = DEMOS_DIR / "bc_mpc_demonstrations.pkl"  
+    BC_POLICY_PATH = CHECKPOINTS_DIR / "bc_mpc_policy.pkl"
 
     # Load the policy
-    policy = PPO.load(str(CHECKPOINTS_DIR / "expert_policy_final_1100000.zip"), env=env_policy, device=device)
+    # policy = PPO.load(str(CHECKPOINTS_DIR / "expert_policy_final_2000000.zip"), env=env_policy, device=device)
+    policy = bc.reconstruct_policy(str(BC_POLICY_PATH), device=device)
 
     # Test MPC on double integrator gym Env
 
@@ -95,7 +99,6 @@ if __name__ == "__main__":
     
     mpc_policy.setup()
     
-    
     for j in range(1):
         # Simulate the policy
         obs, info = env_policy.reset()
@@ -107,8 +110,8 @@ if __name__ == "__main__":
         rewards_policy = []
         rewards_mpc = []
         for i in range(env_policy.unwrapped.max_episode_steps):
-            action_policy, _ = policy.predict(obs)
-            _, action_mpc = mpc_policy.solve_mpc(obs_mpc)
+            action_policy, _ = policy.predict(obs) # trained BC policy
+            _, action_mpc = mpc_policy.solve_mpc(obs_mpc) # normal MPC policy
             obs, reward, terminated, truncated, info = env_policy.step(action_policy)
             obs_mpc, reward_mpc, terminated_mpc, truncated_mpc, info_mpc = env_mpc.step(action_mpc)
             states_policy.append(obs)

@@ -486,7 +486,9 @@ class TrajectoryBuilder:
         self._infos = []
 
     def start_episode(self, initial_obs):
-        self._obs = [np.asarray(initial_obs)]
+        if isinstance(initial_obs, dict): # only for obs that are sequences of observations
+            initial_obs = np.asarray(initial_obs)
+        self._obs = [initial_obs]
         self._acts = []
         self._rews = []
         self._infos = []
@@ -498,7 +500,9 @@ class TrajectoryBuilder:
         self._acts.append(np.asarray(action))
         self._rews.append(float(reward))
         self._infos.append({} if info is None else dict(info))
-        self._obs.append(np.asarray(next_obs))
+        if isinstance(next_obs, dict): # only for obs that are sequences of observations
+            next_obs = np.asarray(next_obs)
+        self._obs.append(next_obs)
 
     def finish(self, terminal: bool = True) -> TrajectoryWithRew:
         """Return immutable TrajectoryWithRew."""

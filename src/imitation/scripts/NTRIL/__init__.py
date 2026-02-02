@@ -4,7 +4,7 @@
 try:
     from imitation.scripts.NTRIL.ntril import NTRILTrainer
     from imitation.scripts.NTRIL.noise_injection import NoiseInjector
-    from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
+    from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC, RobustTubeMPCPolicy
     from imitation.scripts.NTRIL.ranked_dataset import RankedDatasetBuilder
     from imitation.scripts.NTRIL.demonstration_ranked_irl import DemonstrationRankedIRL
     
