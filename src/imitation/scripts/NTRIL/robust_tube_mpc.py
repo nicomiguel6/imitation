@@ -7,7 +7,7 @@ import gymnasium as gym
 import numpy as np
 import torch as th
 from scipy.optimize import minimize
-from scipy.linalg import solve_discrete_are
+from scipy.linalg import solve_discrete_are, solve_continuous_are
 import casadi as ca
 import do_mpc
 import cdd
@@ -99,17 +99,43 @@ class RobustTubeMPC:
 
     def setup(self):
         """Initialize necessary objects for setting up MPC"""
+
+        # ------------ UNDISTURBED MODEL SETUP ------------- #
+        # for use in generating nominal control
+        model_type = "continuous"
+        nominal_model = do_mpc.model.LinearModel(model_type)
+
+        _x = nominal_model.set_variable(
+            var_type="_x", var_name="x", shape=(self.state_dim, 1)
+        )
+        _u = nominal_model.set_variable(
+            var_type="_u", var_name="u", shape=(self.action_dim, 1)
+        )
+
+        nominal_x_next = self.A @ _x + self.B @ _u
+
+        nominal_model.set_rhs("x", nominal_x_next)
+
+        nominal_model.setup()
+
         # ------------ PRELIMINARY SETS ------------- #
+
+        # convert A and B to discrete time
+        disc_model = nominal_model.discretize(t_step=self.time_step)
+        self.A_d = disc_model._A
+        self.B_d = disc_model._B
+
         # Solve for P, K matrices
-        self.P = solve_discrete_are(self.A, self.B, self.Q, self.R)
+        test = solve_continuous_are(self.A, self.B, self.Q, self.R)
+        self.P = solve_discrete_are(self.A_d, self.B_d, self.Q, self.R)
 
         if self.disturbance_bound is not None:
-            self.K = -np.linalg.inv(self.B.T @ self.P @ self.B + self.R) @ (
-                self.B @ self.P @ self.A
+            self.K = -np.linalg.inv(self.B_d.T @ self.P @ self.B_d + self.R) @ (
+                self.B_d.T @ self.P @ self.B_d
             )
 
             # Closed loop
-            self.Ak = self.A + self.B @ self.K
+            self.Ak = self.A_d + self.B_d @ self.K
 
             # Set up disturbance polytope
             self.disturbance_polytope = pytope.Polytope(self.disturbance_vertices)
@@ -139,23 +165,6 @@ class RobustTubeMPC:
                 self.A_u, self.b_u = box_to_Ab(self.control_bounds[0], self.control_bounds[1])
 
 
-        # ------------ UNDISTURBED MODEL SETUP ------------- #
-        # for use in generating nominal control
-        model_type = "continuous"
-        nominal_model = do_mpc.model.Model(model_type)
-
-        _x = nominal_model.set_variable(
-            var_type="_x", var_name="x", shape=(self.state_dim, 1)
-        )
-        _u = nominal_model.set_variable(
-            var_type="_u", var_name="u", shape=(self.action_dim, 1)
-        )
-
-        nominal_x_next = self.A @ _x + self.B @ _u
-
-        nominal_model.set_rhs("x", nominal_x_next)
-
-        nominal_model.setup()
 
         # ------------ CONTROLLER SETUP ------------- #
         # solver for nominal control
@@ -230,8 +239,8 @@ class RobustTubeMPC:
                 var_type="_p", var_name="d", shape=(self.state_dim, 1)
             )
 
-            disturbed_x_next = self.A @ _xd + self.B @ _ud + _d
-            disturbed_model.set_rhs(disturbed_x_next)
+            disturbed_x_next = self.A_d @ _xd + self.B_d @ _ud + _d
+            disturbed_model.set_rhs("xd", disturbed_x_next)
             disturbed_model.setup()
 
             self.simulator = do_mpc.simulator.Simulator(disturbed_model)
@@ -342,6 +351,7 @@ class RobustTubeMPC:
                     builder = util.TrajectoryBuilder()
                     builder.start_episode(initial_obs=sample)
 
+                    # initialize state and action
                     x = sample
                     u = current_nominal_action
                     self.simulator.x0 = x
@@ -350,16 +360,16 @@ class RobustTubeMPC:
                     for t_step in range(partial_horizon - 1):
                         u_applied = current_nominal_action + self.K @ (
                             x.T.reshape(
-                                -1,
+                                -1, 1
                             )
                             - current_nominal_state.reshape(
-                                -1,
+                                -1, 1
                             )
                         )
                         x_next = self.simulator.make_step(u0=u_applied)
                         # calculate tracking cost
                         tracking_cost = self._compute_tracking_cost_metric(
-                            x, u_applied, t + t_step
+                            trajectory.obs[t + t_step], x, trajectory.acts[t + t_step], u_applied, t + t_step
                         )
                         # calculate margin to safety violation
                         margin_safety = self._compute_margin_safety_violation(x)
@@ -375,7 +385,7 @@ class RobustTubeMPC:
                         x = x_next
 
                         current_nominal_state = trajectory.obs[t + t_step]
-                        current_nominal_action = trajectory.obs[t + t_step]
+                        current_nominal_action = trajectory.acts[t + t_step]
 
                     # finalize trajectory
                     traj = builder.finish(terminal=True)
@@ -413,11 +423,13 @@ class RobustTubeMPC:
         return direction * radius
 
     def _compute_tracking_cost_metric(
-        self, x: np.ndarray, u: Optional[np.ndarray], k: int
+        self, nominal_state: np.ndarray, x: np.ndarray, nominal_action: Optional[np.ndarray], u: Optional[np.ndarray], k: int
     ) -> np.float64:
         """Compute tracking cost metric for individual data point
 
         Args:
+            nominal_state (np.ndarray): nominal state
+            nominal_action (Optional[np.ndarray]): nominal action
             x (np.ndarray): current state
             u (Optional[np.ndarray]): current input (if not terminal state)
             k (int): timestep of interest
@@ -426,11 +438,9 @@ class RobustTubeMPC:
             np.float64: tracking cost J from MPC
         """
         # extract reference solution
-        xs = self.xs[k]
-        x_difference = x - xs
+        x_difference = x - nominal_state
         if u:
-            us = self.us[k]
-            u_difference = u - us
+            u_difference = u - nominal_action
             return (
                 x_difference.T @ self.Q @ x_difference
                 + u_difference.T @ self.R @ u_difference
@@ -826,7 +836,7 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     # Step 1: find s such that alpha small enough
     while alpha > epsilon / (epsilon + Ms) and s < max_iter:
         s += 1
-        dirs = (np.linalg.matrix_power(Ak, s) @ W_A.T).T
+        dirs = (np.linalg.matrix_power(Ak.T, s) @ W_A.T).T
         alpha = np.max(
             [support_function_lp(W_A, W_b, d) / bi for d, bi in zip(dirs, W_b)]
         )

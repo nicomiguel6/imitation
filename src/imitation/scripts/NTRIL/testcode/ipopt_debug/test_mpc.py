@@ -5,12 +5,13 @@ import do_mpc
 import cdd
 from scipy.linalg import solve_discrete_are
 from scipy.spatial import ConvexHull
+import control as ct
 import pytope
 
 def main():
 
-    model_type = 'discrete' # either 'discrete' or 'continuous'
-    model = do_mpc.model.Model(model_type)
+    model_type = 'continuous' # either 'discrete' or 'continuous'
+    model = do_mpc.model.LinearModel(model_type)
 
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
     _u = model.set_variable(var_type='_u', var_name='u', shape=(1,1))
@@ -20,15 +21,30 @@ def main():
     Q = np.diag([1,1])
     R = 0.1
 
-    P = solve_discrete_are(A, B, Q, R)
-    K = -np.linalg.inv(B.T @ P @ B + R) @ (B.T @ P @ A)  # LQR gain
+    x_next = A@_x + B@_u
 
+    model.set_rhs('x', x_next)
 
+    model.set_expression(expr_name='cost', expr= _x.T @ Q @ _x)
+
+    # Build the model
+    model.setup()
+
+    discrete_model = model.discretize(t_step=1.0)
+    A_d = discrete_model._A
+    B_d = discrete_model._B
+    A_d = A
+    B_d = B
+
+    P = solve_discrete_are(A_d, B_d, Q, R)
+    K = -np.linalg.inv(B_d.T @ P @ B_d + R) @ (B_d.T @ P @ A_d)  # LQR gain
+    # K = ct.dlqr(A_d, B_d, Q, R)
+    # K = -K[0]
     # closed loop
-    Ak = A + B@K
+    Ak = A_d + B_d@K
 
     # Set up disturbance with cdd
-    W_vertex = np.array([[0.15, 0.15],[0.15, -0.15],[-0.15,-0.15],[-0.15,0.15]], dtype=object)
+    W_vertex = np.array([[0.1, 0.1],[0.1, -0.1],[-0.1,-0.1],[-0.1,0.1]], dtype=object)
     W_polytope = pytope.Polytope(W_vertex)
     gen_mat = cdd.Matrix(
         np.hstack([np.ones((W_vertex.shape[0], 1), dtype=object), W_vertex]).tolist(),
@@ -48,6 +64,10 @@ def main():
     A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
 
     # Compute mrpi set
+    # test other method
+    # W_acc, is_converged, vol_list = min_inv_set(A_d, B_d, Q, R, W_polytope)
+    # A_F = W_acc.A
+    # b_F = W_acc.b
     A_F, b_F = compute_mrpi_hrep(Ak, W_polytope.A, W_polytope.b)
 
     # Tighten
@@ -61,16 +81,6 @@ def main():
     print("State mRPI: ", Xc_robust.V)
     print("Control mRPI: ", Uc_robust.V)
 
-
-
-    x_next = A@_x + B@_u
-
-    model.set_rhs('x', x_next)
-
-    model.set_expression(expr_name='cost', expr= _x.T @ Q @ _x)
-
-    # Build the model
-    model.setup()
 
     mpc = do_mpc.controller.MPC(model)
 
@@ -276,7 +286,61 @@ def minkowski_difference_Hrep(A_x, b_x, A_F, b_F):
         b_tight.append(b - h)
     return np.array(A_x, dtype=float), np.array(b_tight, dtype=float)
 
-def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
+def _polytope_volume(poly):
+    """Estimate polytope volume from vertices."""
+    verts = np.asarray(poly.V, dtype=float)
+    if verts.size == 0:
+        return 0.0
+    if verts.shape[1] == 1:
+        return float(np.max(verts) - np.min(verts))
+    hull = ConvexHull(verts)
+    return float(hull.volume)
+
+def _reduce_polytope(poly):
+    """Reduce polytope representation by rebuilding from vertices."""
+    verts = np.asarray(poly.V, dtype=float)
+    if verts.size == 0:
+        return poly
+    return pytope.Polytope(verts)
+
+def min_inv_set(A, B, Q, R, W, max_iter=50, tol=1e-2):
+    """
+    Compute minimal invariant set via iterative Minkowski sums.
+
+    Args:
+        A, B: Discrete-time dynamics matrices.
+        Q, R: LQR weights.
+        W: Disturbance set as pytope.Polytope (V- or H-rep).
+        max_iter: Maximum iterations.
+        tol: Convergence tolerance on volume change.
+
+    Returns:
+        output: Approximated invariant set (pytope.Polytope).
+        is_converged: Whether volume change fell below tol.
+        vol_list: List of volume estimates per iteration.
+    """
+    # P = solve_discrete_are(A, B, Q, R)
+    # K = np.linalg.inv(B.T @ P @ B + R) @ (B.T @ P @ A)
+    K = ct.dlqr(A, B, Q, R)
+    K = K[0]
+    Acl = A - B @ K
+
+    W0 = W
+    W_acc = W0
+    vol_list = [_polytope_volume(W_acc)]
+    is_converged = False
+
+    for ii in range(1, max_iter + 1):
+        W_acc = W_acc + np.linalg.matrix_power(Acl, ii) * W0
+        W_acc = _reduce_polytope(W_acc)
+        vol_list.append(_polytope_volume(W_acc))
+        if abs(vol_list[-1] - vol_list[-2]) < tol:
+            is_converged = True
+            break
+
+    return W_acc, is_converged, np.array(vol_list)
+
+def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=10):
     """
     Compute mRPI outer-approximation directly in H-rep (like MPT3).
     Returns (A_F, b_F).
@@ -287,7 +351,7 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
     # Step 1: find s such that alpha small enough
     while alpha > epsilon/(epsilon + Ms) and s < max_iter:
         s += 1
-        dirs = (np.linalg.matrix_power(Ak, s) @ W_A.T).T
+        dirs = (np.linalg.matrix_power(Ak.T, s) @ W_A.T).T
         alpha = np.max([
             support_function_lp(W_A, W_b, d) / bi
             for d, bi in zip(dirs, W_b)

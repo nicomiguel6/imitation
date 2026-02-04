@@ -725,10 +725,14 @@ def main():
         tube_radius = 0.05,
         A = np.array([[0.0, 1.0], [0.0, 0.0]]),
         B = np.array([[0.0], [1.0]]),
-        Q = np.eye(2),
-        R = np.eye(1),
-        disturbance_vertices = np.array([[0.1], [-0.1]]),
+        Q = np.diag([10.0, 1.0]),
+        R = 0.01*np.eye(1),
+        disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
+        state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
+        control_bounds = (np.array([-50.0]), np.array([50.0])),
     )
+
+    robust_tube_mpc.setup()
 
 
     # Step 2: Run NTRIL training (Choose step 3 to test sample augmentation)
@@ -753,7 +757,7 @@ def main():
     #     env_id=env_id,
     #     n_episodes=10,
     # )
-
+ 
     print("\n" + "=" * 70)
     print("NTRIL PIPELINE COMPLETED SUCCESSFULLY!")
     print("=" * 70)
