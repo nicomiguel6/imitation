@@ -126,12 +126,11 @@ class RobustTubeMPC:
         self.B_d = disc_model._B
 
         # Solve for P, K matrices
-        test = solve_continuous_are(self.A, self.B, self.Q, self.R)
         self.P = solve_discrete_are(self.A_d, self.B_d, self.Q, self.R)
 
         if self.disturbance_bound is not None:
             self.K = -np.linalg.inv(self.B_d.T @ self.P @ self.B_d + self.R) @ (
-                self.B_d.T @ self.P @ self.B_d
+                self.B_d.T @ self.P @ self.A_d
             )
 
             # Closed loop
@@ -310,8 +309,8 @@ class RobustTubeMPC:
     def augment_trajectory(
         self,
         trajectory: types.Trajectory,
-        partial_horizon: int = 50,
-        k_timesteps: int = 1,
+        partial_horizon: int = 20,
+        k_timesteps: int = 100,
         n_augmentations: int = 5,
     ) -> Sequence[types.TrajectoryWithRew]:
         """Augment a trajectory using robust tube MPC. Sample points every k_timesteps and propagate partial trajectories following ancillary controller u = u0 + K(x-x0) .
@@ -331,7 +330,7 @@ class RobustTubeMPC:
         augmented_trajs = []
 
         for t in range(len(trajectory.obs) - 1):
-            if t % k_timesteps == 0:
+            if t % k_timesteps == 0 and t + partial_horizon < len(trajectory.obs):
 
                 augmented_trajs_t = []
 
@@ -374,8 +373,8 @@ class RobustTubeMPC:
                         # calculate margin to safety violation
                         margin_safety = self._compute_margin_safety_violation(x)
                         builder.add_step(
-                            action=u_applied,
-                            next_obs=x_next,
+                            action=u_applied.flatten(),
+                            next_obs=x_next.flatten(),
                             reward=0.0,
                             info={
                                 "tracking_cost": tracking_cost,
@@ -400,7 +399,7 @@ class RobustTubeMPC:
                         }
                     )
 
-                augmented_trajs.append(augmented_trajs_t)
+                augmented_trajs.extend(augmented_trajs_t)
 
         return augmented_trajs
 
@@ -695,7 +694,7 @@ def get_samples(
         # Iterate over each dimension, extract midpoints
         for dim in range(n_dim):
             tmp = Z_polyhedron.V[:, dim]
-            midpoints.append((np.max(tmp) - np.min(tmp)) / 2.0)
+            midpoints.append((np.max(tmp) + np.min(tmp)) / 2.0)
             minpoints.append(np.min(tmp))
             maxpoints.append(np.max(tmp))
 
@@ -703,7 +702,7 @@ def get_samples(
         for i_dim in range(n_dim):
             for j_dim in range(n_dim):
                 if j_dim == i_dim:
-                    break
+                    continue
 
                 samples.append(np.array([midpoints[i_dim], minpoints[j_dim]]))
                 samples.append(np.array([midpoints[i_dim], maxpoints[j_dim]]))

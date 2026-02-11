@@ -89,7 +89,7 @@ if __name__ == "__main__":
     # Set up MPC as callable policy
     mpc_policy = RobustTubeMPC(
         horizon=10,
-        time_step=0.1,
+        time_step=1.0,
         A=np.array([[0.0, 1.0], [0.0, 0.0]]),
         B=np.array([[0.0], [1.0]]),
         Q=np.diag([10.0, 1.0]),

@@ -82,7 +82,7 @@ def generate_MPC_demonstrations(
     env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
     mpc_policy = RobustTubeMPC(
         horizon=10,
-        time_step=0.1,
+        time_step=1.0,
         A=np.array([[0.0, 1.0], [0.0, 0.0]]),
         B=np.array([[0.0], [1.0]]),
         Q=np.diag([10.0, 1.0]),
@@ -455,7 +455,6 @@ def run_ntril_training(
         irl_lr=1e-3,
         save_dir=save_dir,
     )
-    a = 5 # just to test if the bc policy is being set
     
     if bc_policy is not None:
         ntril_trainer.bc_policy = bc_policy.policy
@@ -525,7 +524,7 @@ def run_ntril_training(
                 if bc_policy is None:
                     raise ValueError("BC policy is required for step 2")
                 print("Step 2: Generating noisy rollouts...")
-                rollout_stats = ntril_trainer._generate_noisy_rollouts()
+                _, rollout_stats = ntril_trainer._generate_noisy_rollouts()
                 step_results["rollouts"] = rollout_stats
                 print(
                     f"\nGenerated rollouts for {len(ntril_trainer.noise_levels)} noise levels"
@@ -535,8 +534,6 @@ def run_ntril_training(
                 # Check if robust MPC is provided
                 if robust_mpc is None:
                     raise ValueError("Robust MPC is required for step 3")
-                if ntril_trainer.noisy_rollouts is None:
-                    raise ValueError("Noisy rollouts are required for step 3")
                 # check if noisy rollouts are available at save location
                 noisy_rollouts_path = os.path.join(save_dir, "noisy_rollouts.pkl")
                 if os.path.exists(noisy_rollouts_path):
@@ -720,7 +717,7 @@ def main():
     # Step 2: Set up robust tube MPC
     robust_tube_mpc = RobustTubeMPC(
         horizon = 10,
-        time_step = 0.1,
+        time_step = 1.0,
         disturbance_bound = 0.1,
         tube_radius = 0.05,
         A = np.array([[0.0, 1.0], [0.0, 0.0]]),
@@ -740,7 +737,7 @@ def main():
         demonstrations=demonstrations,
         env_id=env_id,
         save_dir=str(SAVE_DIR),
-        noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
+        noise_levels=(0.0, 0.1),
         n_rollouts_per_noise=10,
         bc_epochs=50,
         rl_total_timesteps=100_000,

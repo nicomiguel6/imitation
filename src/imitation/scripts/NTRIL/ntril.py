@@ -15,13 +15,12 @@ import torch as th
 from stable_baselines3.common import policies, vec_env
 
 from imitation.algorithms import base, bc
-from imitation.data import rollout, types
+from imitation.data import rollout, types, serialize
 from imitation.policies import base as policy_base
 from imitation.rewards import reward_nets
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
-from imitation.scripts.NTRIL.ranked_dataset import RankedDatasetBuilder
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
-from imitation.scripts.NTRIL.demonstration_ranked_irl import DemonstrationRankedIRL
+from imitation.scripts.NTRIL.demonstration_ranked_irl import RankedTransitionsDataset
 from imitation.util import logger as imit_logger
 from imitation.util import util
 
@@ -277,54 +276,90 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         }
 
     def _augment_data_with_mpc(self) -> Dict[str, Any]:
-        """Apply robust tube MPC to augment the noisy rollouts."""
+        """Apply robust tube MPC to augment the noisy rollouts.
+        Suppose we have S different noise levels. 
+        For each noise level, we have K base trajectory rollouts of length T resulting from RTMPC.
+        For each trajectory rollout, we select T/k_timesteps steps to sample from.
+        At each step, we get N_samples from the tube surrounding the nominal state of the trajectory.
+        For each sample, we propagate the dynamics starting from that sample and following the ancillary controller u = u0 + K(x-x0) .
+        Thefore, for each trajectory rollout, we get K*N_samples*T/k_timesteps augmented trajectories.
+
+        EXAMPLE:
+        Suppose we have 5 noise levels, and for each noise level, we have 2 trajectory rollouts of length 100.
+        We sample every 10 steps for each trajectory rollout, and produce 4 samples per step.
+        For each sample, we propagate forward 20 steps using the dynamics and the ancillary controller.
+        Therefore, for each noise level, we have 2*(100/10)*4 = 80 augmented trajectory snippets.
+
+        STRUCTURE OF AUGMENTED DATA:
+        Augmented data is a list of lists, where each inner list contains the augmented trajectories for a given noise level.
+        self.augmented_data = [[augmented_trajectories_noise_level_1],
+                               [augmented_trajectories_noise_level_2],
+                               ...,
+                               [augmented_trajectories_noise_level_S]]
+        
+        augmented_trajectories_noise_level_i = [augmented_trajectory_base_1, augmented_trajectory_base_2, ..., augmented_trajectory_base_K] (list of K original rollouts that were augmented)
+        augmented_trajectory_base_j = [augmented_trajectory_base_j_1, augmented_trajectory_base_j_2, ..., augmented_trajectory_base_j_N_samples*T/k_timesteps] (list of N_samples*T/k_timesteps augmented trajectories for the j-th original rollout)
+
+        So self.augmented_data[i][j] is the j-th augmented trajectory for the i-th noise level.
+        """
         self.augmented_data = []
         total_augmented_transitions = 0
 
         for noise_idx, rollouts in enumerate(self.noisy_rollouts):
             noise_level = self.noise_levels[noise_idx]
+            augmented_data_for_noise_level = []
 
-            for traj in rollouts:
+            for traj_idx, traj in enumerate(rollouts):
                 # Apply robust tube MPC to each trajectory
-                augmented_transitions = self.robust_mpc.augment_trajectory(
+                augmented_trajectories = self.robust_mpc.augment_trajectory(
                     traj
                 )
-                self.augmented_data.append(augmented_transitions)
-                total_augmented_transitions += len(augmented_transitions.obs)
+                augmented_data_for_noise_level.extend(augmented_trajectories)
 
-        return {
-            "total_augmented_transitions": total_augmented_transitions,
-            "augmentation_ratio": total_augmented_transitions
-            / sum(
-                len(rollouts) * np.mean([len(traj) for traj in rollouts])
-                for rollouts in self.noisy_rollouts
-            ),
-        }
+            # Save each augmented_data_for_noise_level to a file
+            serialize.save(os.path.join(self.save_dir, f"noise_{noise_level:.2f}.pkl"), augmented_data_for_noise_level)
+            self.augmented_data.append(augmented_data_for_noise_level) 
+        
+        return self.augmented_data 
 
-    def _build_ranked_dataset(self) -> Dict[str, Any]:
+    def _build_ranked_dataset(self) -> RankedTransitionsDataset:
         """Build ranked dataset from augmented data."""
-        # Combine all augmented data with noise level rankings
-        noise_rankings = []
-        all_transitions = []
 
-        for noise_idx, transitions in enumerate(self.augmented_data):
-            noise_level = self.noise_levels[noise_idx % len(self.noise_levels)]
-            all_transitions.append(transitions)
-            noise_rankings.extend([noise_level] * len(transitions.obs))
+        ranked_path = os.path.join(self.save_dir, "ranked_samples.pth")
 
-        # Build ranked dataset
-        self.ranked_dataset = self.dataset_builder.build_ranked_dataset(
-            all_transitions,
-            noise_rankings,
+        # First, check if ranked samples already exist in the save directory
+        if os.path.exists(ranked_path):
+            saved = th.load(ranked_path)
+            self.ranked_dataset = RankedTransitionsDataset(
+                demonstrations=self.augmented_data,
+                training_samples=saved["samples"],
+                num_snippets=saved["num_snippets"],
+                min_segment_length=saved["min_segment_length"],
+                max_segment_length=saved["max_segment_length"],
+            )
+            return self.ranked_dataset
+
+        # Otherwise, build ranked samples from augmented data
+        self.ranked_dataset = RankedTransitionsDataset(
+            demonstrations=self.augmented_data,
+            num_snippets=100,  # default; can be parameterized
+            min_segment_length=50,
+            max_segment_length=100,
         )
 
-        return {
-            "total_ranked_transitions": len(self.ranked_dataset.obs),
-            "unique_noise_levels": len(set(noise_rankings)),
-            "ranking_distribution": dict(
-                zip(*np.unique(noise_rankings, return_counts=True))
-            ),
-        }
+        # Extract samples and save for reuse
+        training_samples = [self.ranked_dataset[i] for i in range(len(self.ranked_dataset))]
+        th.save(
+            {
+                "samples": training_samples,
+                "num_snippets": self.ranked_dataset.num_snippets,
+                "min_segment_length": self.ranked_dataset.min_segment_length,
+                "max_segment_length": self.ranked_dataset.max_segment_length,
+            },
+            ranked_path,
+        )
+
+        return self.ranked_dataset
 
     def _train_reward_network(self, **kwargs) -> Dict[str, Any]:
         """Train reward network using demonstration ranked IRL."""

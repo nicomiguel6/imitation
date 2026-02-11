@@ -55,16 +55,14 @@ def main():
     loaded_traj = serialize.load(save_path_traj)
     loaded_data = torch.load(save_path_data, map_location=device, weights_only=False)
 
-    # Set up Dataset
+    # Set up Dataset from precomputed training samples
     training_dataset = RankedTransitionsDataset(
         demonstrations=[loaded_traj],
+        training_samples=loaded_data["samples"],
         num_snippets=loaded_data["num_snippets"],
         min_segment_length=loaded_data["min_segment_length"],
         max_segment_length=loaded_data["max_segment_length"],
-        generate_samples=False,
     )
-
-    training_dataset.load_training_samples(loaded_data["samples"])
 
     # Set up DataLoader and custom collate function
     def my_collate(batch):

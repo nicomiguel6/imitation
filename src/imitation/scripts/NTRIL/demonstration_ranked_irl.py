@@ -1,5 +1,6 @@
 """Demonstration Ranked Inverse Reinforcement Learning for NTRIL pipeline."""
 
+import os
 import abc
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -26,25 +27,30 @@ class RankedTransitionsDataset(Dataset):
 
     def __init__(
         self,
-        demonstrations: List[Sequence[types.TrajectoryWithRew]],
+        demonstrations: Optional[List[Sequence[types.TrajectoryWithRew]]] = None,
+        training_samples: Optional[List[Tuple[Tuple[np.ndarray, np.ndarray], int]]] = None,
         num_snippets: int = 10,
         min_segment_length: int = 50,
         max_segment_length: int = 100,
-        generate_samples: bool = True,
     ):
         """Initialize ranked transitions dataset.
 
-        From the total set of demonstrations, a number of snippets will be generated
+        From the total set of demonstrations, a number of snippets will be generated,
+        unless precomputed training_samples are provided.
 
         Args:
-            demonstrations: Noisy rollout demonstration trajectories
-            num_snippets: total number of training samples to generate
-            min_segment_length: minimum length of segments extracted from a trajectory
-            max_segment_length: maximum length of segments extracted from a trajectory
-            generate_samples: boolean to determine whether to generate samples upon object instantiation.
-                If False, then samples of the form (snippet_i, snippet_j, label) must be passed to self.training_data
+            demonstrations: Noisy rollout demonstration trajectories.
+            training_samples: Optional precomputed samples of the form
+                ((snippet_i, snippet_j), label). If provided, no new samples
+                are generated from demonstrations.
+            num_snippets: Total number of training samples to generate when
+                building from demonstrations.
+            min_segment_length: Minimum length of segments extracted from a trajectory.
+            max_segment_length: Maximum length of segments extracted from a trajectory.
         """
-        # self.ranked_transitions = ranked_transitions
+        if demonstrations is None and training_samples is None:
+            raise ValueError("Either demonstrations or training samples must be provided")
+
         self.num_snippets = num_snippets
         self.min_segment_length = min_segment_length
         self.max_segment_length = max_segment_length
@@ -52,10 +58,13 @@ class RankedTransitionsDataset(Dataset):
         self.demonstrations = []
         self.training_data = {"traj": [], "label": []}
 
-        self._append_demonstrations(demonstrations)
-        self._build_dict()
-
-        if generate_samples:
+        if training_samples is not None:
+            # Directly load precomputed samples.
+            self.load_training_samples(training_samples)
+        elif demonstrations is not None:
+            # Build from raw demonstrations.
+            self._append_demonstrations(demonstrations)
+            self._build_dict()
             self._generate_training_samples()
 
         # Prepare expert segments
@@ -129,6 +138,9 @@ class RankedTransitionsDataset(Dataset):
 
             self.training_data["traj"].append((snip_i, snip_j))
             self.training_data["label"].append(label)
+
+        # save all data to file
+
 
     def load_training_samples(
         self, training_samples: List[Tuple[Tuple[np.ndarray, np.ndarray], int]]
