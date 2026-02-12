@@ -225,7 +225,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 }
             )
 
-            # Collect rollouts
+            # Collect rollouts (exclude_infos=False so label_info / noise_applied stay)
             rollouts = rollout.rollout(
                 noisy_policy,
                 self.venv,
@@ -234,6 +234,8 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                     min_timesteps=1000,
                 ),
                 rng=self.rng,
+                label_info={"noise_level": noise_level},
+                exclude_infos=False,
             )
 
             self.noisy_rollouts.append(rollouts)
@@ -317,7 +319,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 augmented_data_for_noise_level.extend(augmented_trajectories)
 
             # Save each augmented_data_for_noise_level to a file
-            serialize.save(os.path.join(self.save_dir, f"noise_{noise_level:.2f}.pkl"), augmented_data_for_noise_level)
+            serialize.save(os.path.join(self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl"), augmented_data_for_noise_level)
             self.augmented_data.append(augmented_data_for_noise_level) 
         
         return self.augmented_data 
@@ -340,6 +342,16 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             return self.ranked_dataset
 
         # Otherwise, build ranked samples from augmented data
+
+        # First, check if augmented_data for noise levels already exist in the save directory
+        for noise_level in self.noise_levels:
+            augmented_data_path = os.path.join(self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl")
+            if os.path.exists(augmented_data_path):
+                augmented_data = serialize.load(os.path.join(self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl"))
+                self.augmented_data.append(augmented_data)
+            else:
+                raise ValueError(f"Augmented data not found at {augmented_data_path}. Please run _augment_data_with_mpc() first.")
+
         self.ranked_dataset = RankedTransitionsDataset(
             demonstrations=self.augmented_data,
             num_snippets=100,  # default; can be parameterized

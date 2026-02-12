@@ -497,6 +497,24 @@ def generate_trajectories(
             dones,
             infos,
         )
+
+        # Add trajectory-level total applied noise sum to final step info when present.
+        # Update the terminal info dict in place so we don't reassign it (and avoid
+        # copying through the whole terminal info, e.g. "rollout" with full obs/rews).
+        for traj in new_trajs:
+            if traj.infos is None:
+                continue
+            has_noise_info = any(
+                step_info.get("noise_applied") or "noise_level" in step_info
+                for step_info in traj.infos
+            )
+            if not has_noise_info:
+                continue
+            total_applied = 0.0
+            for step_info in traj.infos:
+                if step_info.get("noise_applied", False):
+                    total_applied += step_info.get("noise_level", 0.0)
+            traj.infos[-1]["total_applied_noise_sum"] = total_applied
         trajectories.extend(new_trajs)
 
         if sample_until(trajectories):

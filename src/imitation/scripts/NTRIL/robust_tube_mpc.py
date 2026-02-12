@@ -337,6 +337,8 @@ class RobustTubeMPC:
                 # Extract current nominal state and action
                 current_nominal_state = trajectory.obs[t]
                 current_nominal_action = trajectory.acts[t]
+                current_noise_level = trajectory.infos[t].get("noise_level")
+                total_applied_noise_sum = trajectory.infos[-1].get("total_applied_noise_sum")
 
                 # Sample points at center of bounding box facets
                 tube_set = current_nominal_state + self.Z
@@ -379,6 +381,8 @@ class RobustTubeMPC:
                             info={
                                 "tracking_cost": tracking_cost,
                                 "margin_safety": margin_safety,
+                                "noise_level": current_noise_level,
+                                "total_applied_noise_sum": total_applied_noise_sum,
                             },
                         )
                         x = x_next
@@ -394,7 +398,6 @@ class RobustTubeMPC:
                     augmented_infos.append(
                         {
                             "original_timestep": t,
-                            "noise_level": 7,
                             "augmentation_method": "robust_tube_mpc",
                         }
                     )
