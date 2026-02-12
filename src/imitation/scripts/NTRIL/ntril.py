@@ -1,22 +1,19 @@
 """Main NTRIL (Noisy Trajectory Ranked Imitation Learning) algorithm implementation."""
 
-import abc
 import dataclasses
 import json
 import pickle
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, Mapping, Optional, Sequence
 
-import gymnasium as gym
 import numpy as np
 import torch as th
 from stable_baselines3.common import policies, vec_env
 
 from imitation.algorithms import base, bc
 from imitation.data import rollout, types, serialize
-from imitation.policies import base as policy_base
 from imitation.rewards import reward_nets
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
@@ -305,7 +302,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         So self.augmented_data[i][j] is the j-th augmented trajectory for the i-th noise level.
         """
         self.augmented_data = []
-        total_augmented_transitions = 0
+        # total_augmented_transitions could be tracked here if needed for logging.
 
         for noise_idx, rollouts in enumerate(self.noisy_rollouts):
             noise_level = self.noise_levels[noise_idx]
@@ -338,6 +335,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 num_snippets=saved["num_snippets"],
                 min_segment_length=saved["min_segment_length"],
                 max_segment_length=saved["max_segment_length"],
+                snippet_start_strategy=saved.get("snippet_start_strategy", "aligned"),
             )
             return self.ranked_dataset
 
@@ -355,8 +353,9 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         self.ranked_dataset = RankedTransitionsDataset(
             demonstrations=self.augmented_data,
             num_snippets=100,  # default; can be parameterized
-            min_segment_length=50,
-            max_segment_length=100,
+            min_segment_length=20,
+            max_segment_length=20,
+            snippet_start_strategy="aligned",
         )
 
         # Extract samples and save for reuse
@@ -367,6 +366,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 "num_snippets": self.ranked_dataset.num_snippets,
                 "min_segment_length": self.ranked_dataset.min_segment_length,
                 "max_segment_length": self.ranked_dataset.max_segment_length,
+                "snippet_start_strategy": self.ranked_dataset.snippet_start_strategy,
             },
             ranked_path,
         )

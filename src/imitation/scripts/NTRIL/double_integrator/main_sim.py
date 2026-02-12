@@ -741,7 +741,7 @@ def main():
         n_rollouts_per_noise=10,
         bc_epochs=50,
         rl_total_timesteps=100_000,
-        run_individual_steps=[2,3],  # Change to None to run full training
+        run_individual_steps=[4],  # Change to None to run full training
         just_plot_noisy_rollouts=False,
         bc_policy=bc_policy,
         robust_mpc=robust_tube_mpc,

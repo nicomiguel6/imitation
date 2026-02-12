@@ -1,25 +1,18 @@
 """Demonstration Ranked Inverse Reinforcement Learning for NTRIL pipeline."""
 
-import os
-import abc
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch as th
-import gymnasium as gym
 import random
-import tqdm
 import torch.nn as nn
-import torch.nn.functional as F
 from stable_baselines3.common import vec_env
-from stable_baselines3.common import preprocessing
 from torch.utils.data import DataLoader, Dataset
 
 from imitation.algorithms import base
-from imitation.data import rollout, types
+from imitation.data import types
 from imitation.rewards import reward_nets
 from imitation.util import logger as imit_logger
-from imitation.util import networks, util
 
 
 class RankedTransitionsDataset(Dataset):
@@ -32,6 +25,7 @@ class RankedTransitionsDataset(Dataset):
         num_snippets: int = 10,
         min_segment_length: int = 50,
         max_segment_length: int = 100,
+        snippet_start_strategy: str = "aligned",
     ):
         """Initialize ranked transitions dataset.
 
@@ -47,6 +41,12 @@ class RankedTransitionsDataset(Dataset):
                 building from demonstrations.
             min_segment_length: Minimum length of segments extracted from a trajectory.
             max_segment_length: Maximum length of segments extracted from a trajectory.
+            snippet_start_strategy: Strategy for choosing snippet start indices.
+                Options:
+                - "aligned": both snippets start at the same time index (and have same length).
+                - "independent": each snippet start is sampled independently.
+                - "better_later": enforce better snippet starts later (better_start >= worse_start),
+                  where "better" is defined as lower noise epsilon.
         """
         if demonstrations is None and training_samples is None:
             raise ValueError("Either demonstrations or training samples must be provided")
@@ -54,6 +54,13 @@ class RankedTransitionsDataset(Dataset):
         self.num_snippets = num_snippets
         self.min_segment_length = min_segment_length
         self.max_segment_length = max_segment_length
+        self.snippet_start_strategy = snippet_start_strategy
+        allowed_strategies = {"aligned", "independent", "better_later"}
+        if self.snippet_start_strategy not in allowed_strategies:
+            raise ValueError(
+                f"Invalid snippet_start_strategy={self.snippet_start_strategy!r}. "
+                f"Must be one of {sorted(allowed_strategies)}."
+            )
         self.demo_dict = {}
         self.demonstrations = []
         self.training_data = {"traj": [], "label": []}
@@ -115,16 +122,52 @@ class RankedTransitionsDataset(Dataset):
             tj = random.choice(self.demo_dict[noise_levels[nj]])
 
             # Create random snippet from each trajectory
-            min_length = min(len(ti), len(tj))
-            rand_length = np.random.randint(
-                self.min_segment_length, self.max_segment_length
-            )
-            if ni < nj:  # bin i has less noise so choose ti snippet to be later than tj
-                tj_start = np.random.randint(min_length - rand_length + 1)
-                ti_start = np.random.randint(tj_start, len(ti) - rand_length + 1)
-            else:  # tj has less noise so start later
-                ti_start = np.random.randint(min_length - rand_length + 1)
-                tj_start = np.random.randint(ti_start, len(tj) - rand_length + 1)
+            min_length = min(len(ti.obs), len(tj.obs))
+            if self.min_segment_length == self.max_segment_length:
+                rand_length = self.min_segment_length
+            else:
+                rand_length = np.random.randint(
+                    self.min_segment_length, self.max_segment_length
+                )
+            # Ensure rand_length doesn't exceed either trajectory length
+            rand_length = min(rand_length, min_length)
+            if rand_length < 1:
+                raise ValueError(
+                    f"Sampled segment length {rand_length} is invalid for "
+                    f"trajectories with lengths {len(ti.obs)} and {len(tj.obs)}."
+                )
+
+            # Lower noise is assumed to be better (higher-ranked).
+            ti_better = noise_levels[ni] < noise_levels[nj]
+
+            if self.snippet_start_strategy == "aligned":
+                # Simplest: both snippets start at the same time index.
+                start = np.random.randint(min_length - rand_length + 1)
+                ti_start = start
+                tj_start = start
+            elif self.snippet_start_strategy == "independent":
+                # Starts are sampled independently.
+                ti_start = np.random.randint(len(ti.obs) - rand_length + 1)
+                tj_start = np.random.randint(len(tj.obs) - rand_length + 1)
+            elif self.snippet_start_strategy == "better_later":
+                # Enforce "better starts later" (or equal):
+                # better_start >= worse_start.
+                worse_start = np.random.randint(min_length - rand_length + 1)
+                if ti_better:
+                    tj_start = worse_start
+                    ti_start = np.random.randint(
+                        worse_start, len(ti.obs) - rand_length + 1
+                    )
+                else:
+                    ti_start = worse_start
+                    tj_start = np.random.randint(
+                        worse_start, len(tj.obs) - rand_length + 1
+                    )
+            else:
+                # Should be impossible due to validation in __init__.
+                raise RuntimeError(
+                    f"Unhandled snippet_start_strategy={self.snippet_start_strategy!r}"
+                )
 
             snip_i = ti.obs[ti_start : ti_start + rand_length : step]
             snip_j = tj.obs[tj_start : tj_start + rand_length : step]
