@@ -90,7 +90,7 @@ if __name__ == "__main__":
 
     # Set up MPC as callable policy (always pass in A,B as continuous time matrices. do_mpc will discretize internally.)
     mpc_policy = RobustTubeMPC(
-        horizon=6,
+        horizon=20,
         time_step=1.0,
         A=np.array([[0.0, 1.0], [0.0, 0.0]]),
         B=np.array([[0.0], [1.0]]),
@@ -131,7 +131,7 @@ if __name__ == "__main__":
         ax.plot(np.array(states_mpc)[:, 0], "r-", label="MPC Trajectory")
         ax.set_xlabel("Time")
         ax.set_ylabel("Position")
-        ax.set_title("Trajectory Comparison of Trained Policy and MPC")
+        ax.set_title("Trajectory Comparison of Suboptimal PID Policy and MPC")
         ax.legend()
         fig.savefig(SCRIPT_DIR / f"trajectory_comparison_{j}.png")
         plt.close()

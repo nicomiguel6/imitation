@@ -156,7 +156,7 @@ class DoubleIntegratorEnv(gym.Env):
         """
         # Clip action to valid range
         action = np.asarray(action, dtype=np.float32).reshape(1,)
-        #action = np.clip(action, -self.max_acceleration, self.max_acceleration)
+        action = np.clip(action, -self.max_acceleration, self.max_acceleration)
 
         xdot = self.A @ self.state + self.B @ action
         self.state = self.state + xdot * self.dt
