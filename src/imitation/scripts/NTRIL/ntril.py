@@ -5,19 +5,23 @@ import json
 import pickle
 import logging
 import os
+import functools
 from datetime import datetime
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 import torch as th
+from torch.utils.data import DataLoader
 from stable_baselines3.common import policies, vec_env
+from stable_baselines3 import PPO
 
 from imitation.algorithms import base, bc
 from imitation.data import rollout, types, serialize
-from imitation.rewards import reward_nets
+from imitation.rewards.reward_nets import RewardNet, TrajectoryRewardNet
 from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
-from imitation.scripts.NTRIL.demonstration_ranked_irl import RankedTransitionsDataset
+from imitation.rewards.reward_wrapper import RewardVecEnvWrapper
+from imitation.scripts.NTRIL.demonstration_ranked_irl import RankedTransitionsDataset, DemonstrationRankedIRL
 from imitation.util import logger as imit_logger
 from imitation.util import util
 
@@ -44,7 +48,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     disturbance_bound: float = 0.1
     bc_batch_size: int = 32
     bc_train_kwargs: Optional[Mapping[str, Any]] = None
-    reward_net: Optional[reward_nets.RewardNet] = None
+    reward_net: Optional[RewardNet] = None
     irl_batch_size: int = 32
     irl_lr: float = 1e-3
     save_dir: Optional[str] = None
@@ -86,7 +90,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         
         # Reward network
         if self.reward_net is None:
-            reward_net = reward_nets.TrajectoryRewardNet(
+            reward_net = TrajectoryRewardNet(
                 observation_space=self.venv.observation_space,
                 action_space=self.venv.action_space,
                 use_state=True,
@@ -375,33 +379,105 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
     def _train_reward_network(self, **kwargs) -> Dict[str, Any]:
         """Train reward network using demonstration ranked IRL."""
-        if self.ranked_dataset is None:
-            raise ValueError(
-                "Ranked dataset must be built before training reward network"
-            )
 
-        irl_stats = self.irl_trainer.train(
-            demonstrations=self.demonstrations,
-            ranked_dataset=self.ranked_dataset,
-            **kwargs,
+        # check if reward network already exists in the save directory
+        reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth")
+        if os.path.exists(reward_net_path):
+            self.reward_net = th.load(reward_net_path)
+            self.reward_net.to(self.device)
+            return self.reward_net
+
+        if self.ranked_dataset is None:
+            self._build_ranked_dataset()
+
+        def my_collate(batch):
+            segment_data = [batch_data[0] for batch_data in batch]
+            labels = [batch_data[1] for batch_data in batch]
+            return segment_data, labels
+
+        # Parse kwargs for batch size and other training parameters (set default values if they are not provided)
+        batch_size = kwargs.get("batch_size", self.irl_batch_size)
+        lr = kwargs.get("lr", self.irl_lr)
+        n_epochs = kwargs.get("n_epochs", 100)
+        weight_decay = kwargs.get("weight_decay", 1e-4)
+        ranking_loss_weight = kwargs.get("ranking_loss_weight", 1.0)
+        preference_loss_weight = kwargs.get("preference_loss_weight", 1.0)
+        regularization_weight = kwargs.get("regularization_weight", 1e-3)
+        segment_length = kwargs.get("segment_length", 20)
+
+        # Set up dataloader
+        train_dataloader = DataLoader(
+            self.ranked_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=my_collate,
         )
 
-        self.learned_reward_net = self.irl_trainer.reward_net
-        return irl_stats
+        # Set up reward net
+        reward_net = TrajectoryRewardNet(
+            observation_space=self.venv.observation_space,
+            action_space=self.venv.action_space,
+            use_state=True,
+            use_action=False,
+            use_next_state=False,
+            use_done=False,
+            hid_sizes=(256, 256),
+        )
+
+        # Train reward network using demonstration ranked IRL
+        self.reward_learner = DemonstrationRankedIRL(reward_net=reward_net, venv=self.venv, batch_size=batch_size, device=self.device) 
+
+        self.reward_learner.train(train_dataloader=train_dataloader)
+
+        # save reward network
+        save_dir = os.path.join(self.save_dir, "reward_net")
+        os.makedirs(save_dir, exist_ok=True)
+        th.save(self.reward_learner.reward_net.state_dict(), os.path.join(save_dir, "reward_net_state.pth"))
+
+        self.reward_learner.reward_net.to(self.device)
+
+        return self.reward_learner.reward_net
 
     def _train_final_policy(self, total_timesteps: int, **kwargs) -> Dict[str, Any]:
         """Train final policy using RL with learned reward."""
-        if self.learned_reward_net is None:
-            raise ValueError(
-                "Reward network must be trained before training final policy"
-            )
 
-        # This would integrate with existing RL training infrastructure
-        # For now, return placeholder stats
-        return {
-            "total_timesteps": total_timesteps,
-            "final_policy_trained": True,
-        }
+        # Check if final policy already exists in the save directory
+        final_policy_path = os.path.join(self.save_dir, "final_policy", "final_policy.zip")
+        if os.path.exists(final_policy_path):
+            self.final_policy = util.load_policy(final_policy_path)
+            return self.final_policy
+        
+        # Check if reward network already exists in the save directory
+        reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth")
+        if not os.path.exists(reward_net_path):
+            _ = self._train_reward_network()
+        else:
+            loaded_state = th.load(reward_net_path)
+            self.reward_net = TrajectoryRewardNet(
+                observation_space=self.venv.observation_space,
+                action_space=self.venv.action_space,
+                use_state=True,
+                use_action=False,
+                use_next_state=False,
+                use_done=False,
+            )
+            self.reward_net.load_state_dict(loaded_state)
+
+        # Set up RL training
+        relabel_reward_fn = functools.partial(
+            self.reward_net.predict_processed, update_stats=False
+        )
+
+        learned_reward_venv = RewardVecEnvWrapper(self.venv, relabel_reward_fn)
+        agent = PPO(
+            "MlpPolicy", learned_reward_venv, n_steps=2048 // learned_reward_venv.num_envs
+        )
+        agent.learn(total_timesteps=total_timesteps, progress_bar=True)
+        agent.save(os.path.join(self.save_dir, "final_policy", "final_policy.zip"))
+        self.final_policy = agent
+        print(f"Final policy saved to {os.path.join(self.save_dir, 'final_policy', 'final_policy.zip')}")
+
+        return self.final_policy
     
     @property
     def robust_mpc(self) -> RobustTubeMPC:

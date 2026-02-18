@@ -38,10 +38,10 @@ class DoubleIntegratorEnv(gym.Env):
 
     def __init__(
         self,
-        dt: float = 0.1,
+        dt: float = 1.0,
         max_position: float = 10.0,
         max_velocity: float = 10.0,
-        max_acceleration: float = 50.0,
+        max_acceleration: float = 2.0,
         target_position: float = 0.0,
         position_tolerance: float = 0.1,
         velocity_tolerance: float = 0.1,
@@ -156,7 +156,7 @@ class DoubleIntegratorEnv(gym.Env):
         """
         # Clip action to valid range
         action = np.asarray(action, dtype=np.float32).reshape(1,)
-        action = np.clip(action, -self.max_acceleration, self.max_acceleration)
+        #action = np.clip(action, -self.max_acceleration, self.max_acceleration)
 
         xdot = self.A @ self.state + self.B @ action
         self.state = self.state + xdot * self.dt
@@ -178,6 +178,10 @@ class DoubleIntegratorEnv(gym.Env):
             velocity = 0
         if position == self.max_position and velocity > 0:
             velocity = 0
+
+        # Important: write clipped values back to internal state.
+        # Otherwise self.state can silently diverge even though the returned values look bounded.
+        self.state = np.array([position, velocity], dtype=np.float32)
 
         self.step_count += 1
 
@@ -233,8 +237,8 @@ class DoubleIntegratorEnv(gym.Env):
     def suboptimal_expert(
         self,
         state: np.ndarray,
-        K_position: float = 5.0,
-        K_velocity: float = 2.0,
+        K_position: float = 1.2176,
+        K_velocity: float = 1.6073,
     ) -> np.ndarray:
         """Suboptimal expert policy for the double integrator environment.
 
@@ -248,11 +252,10 @@ class DoubleIntegratorEnv(gym.Env):
         position_ref = self.target_position
         velocity_ref = 0.0
 
-        acceleration = K_position * (position_ref - position) + K_velocity * (
-            velocity_ref - velocity
-        )
+        K = np.array([[K_position, K_velocity]], dtype=np.float32)
+        acceleration = -K @ np.array([[position - position_ref], [velocity - velocity_ref]])
 
-        return np.array([acceleration])
+        return acceleration.astype(np.float32)
 
 
 

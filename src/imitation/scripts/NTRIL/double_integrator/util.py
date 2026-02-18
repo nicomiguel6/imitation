@@ -79,23 +79,25 @@ if __name__ == "__main__":
     MPC_DEMOS_DIR = DEMOS_DIR / "mpc_demonstrations.pkl"
     BC_DEMOS_DIR = DEMOS_DIR / "bc_mpc_demonstrations.pkl"  
     BC_POLICY_PATH = CHECKPOINTS_DIR / "bc_mpc_policy.pkl"
+    FINAL_POLICY_PATH = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
 
-    # Load the policy
+
     # policy = PPO.load(str(CHECKPOINTS_DIR / "expert_policy_final_2000000.zip"), env=env_policy, device=device)
-    policy = bc.reconstruct_policy(str(BC_POLICY_PATH), device=device)
+    # policy = bc.reconstruct_policy(str(BC_POLICY_PATH), device=device)
+    # policy = PPO.load(str(FINAL_POLICY_PATH), env=env_policy, device=device)
 
     # Test MPC on double integrator gym Env
 
-    # Set up MPC as callable policy
+    # Set up MPC as callable policy (always pass in A,B as continuous time matrices. do_mpc will discretize internally.)
     mpc_policy = RobustTubeMPC(
-        horizon=10,
+        horizon=6,
         time_step=1.0,
         A=np.array([[0.0, 1.0], [0.0, 0.0]]),
         B=np.array([[0.0], [1.0]]),
         Q=np.diag([10.0, 1.0]),
-        R=0.01*np.eye(1),
+        R=0.1*np.eye(1),
         state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds=(np.array([-50.0]), np.array([50.0])))
+        control_bounds=(np.array([-2.0]), np.array([2.0])))
     
     mpc_policy.setup()
     
@@ -110,7 +112,7 @@ if __name__ == "__main__":
         rewards_policy = []
         rewards_mpc = []
         for i in range(env_policy.unwrapped.max_episode_steps):
-            action_policy, _ = policy.predict(obs) # trained BC policy
+            action_policy = env_policy.unwrapped.suboptimal_expert(obs) # trained final policy
             _, action_mpc = mpc_policy.solve_mpc(obs_mpc) # normal MPC policy
             obs, reward, terminated, truncated, info = env_policy.step(action_policy)
             obs_mpc, reward_mpc, terminated_mpc, truncated_mpc, info_mpc = env_mpc.step(action_mpc)
@@ -125,12 +127,13 @@ if __name__ == "__main__":
 
         # Plot both phase portraits in same figure
         fig, ax = plt.subplots()
-        ax.plot(np.array(states_policy)[:, 0], "k-", label="trajectory")
-        ax.plot(np.array(states_mpc)[:, 0], "r-", label="MPC trajectory")
+        ax.plot(np.array(states_policy)[:, 0], "k-", label="PID Trajectory")
+        ax.plot(np.array(states_mpc)[:, 0], "r-", label="MPC Trajectory")
         ax.set_xlabel("Time")
         ax.set_ylabel("Position")
         ax.set_title("Trajectory Comparison of Trained Policy and MPC")
-        fig.savefig(DEMOS_DIR / f"trajectory_comparison_{j}.png")
+        ax.legend()
+        fig.savefig(SCRIPT_DIR / f"trajectory_comparison_{j}.png")
         plt.close()
 
         # Print total policy cost

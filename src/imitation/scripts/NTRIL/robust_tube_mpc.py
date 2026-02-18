@@ -171,7 +171,7 @@ class RobustTubeMPC:
         setup_mpc = {
             "n_horizon": self.horizon,
             "t_step": self.time_step,
-            "state_dicretization": "collocation",
+            "state_discretization": "collocation",
             "collocation_type": "radau",
             "collocation_deg": 3,
             "collocation_ni": 1,
@@ -238,7 +238,7 @@ class RobustTubeMPC:
                 var_type="_p", var_name="d", shape=(self.state_dim, 1)
             )
 
-            disturbed_x_next = self.A_d @ _xd + self.B_d @ _ud + _d
+            disturbed_x_next = self.A @ _xd + self.B @ _ud + _d
             disturbed_model.set_rhs("xd", disturbed_x_next)
             disturbed_model.setup()
 

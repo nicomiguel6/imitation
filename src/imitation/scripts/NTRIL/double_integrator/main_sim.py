@@ -42,6 +42,62 @@ from imitation.data.types import Trajectory
 import matplotlib.pyplot as plt
 
 
+def generate_PID_demonstrations(
+    env_id: str = "DoubleIntegrator-v0",
+    device: str = "cuda",
+    n_episodes: int = 20,
+    train_timesteps: int = 10_000_000,
+    checkpoint_interval: int = 1_000_000,
+    use_checkpoint_at: Optional[int] = None,
+    force_retrain: bool = False,
+):
+    """Generate demonstrations using PID."""
+    print("\n" + "=" * 70)
+    print("STEP 1a: Generating PID Demonstrations")
+    print("=" * 70)
+
+    # Get the directory where THIS script is located
+    SCRIPT_DIR = Path(__file__).parent.resolve()
+
+    # Define all paths relative to script directory
+    DEBUG_DIR = SCRIPT_DIR / "debug"
+    CHECKPOINTS_DIR = DEBUG_DIR / "policy_checkpoints"
+    DEMOS_DIR = DEBUG_DIR / "demonstrations"
+
+    DEMO_PATH = DEMOS_DIR / "pid_demonstrations.pkl"
+
+    # Create directories
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    DEMOS_DIR.mkdir(parents=True, exist_ok=True)
+
+    ## return if demonstrations already exist
+    if DEMO_PATH.exists() and not force_retrain:
+        print(f"✓ Found existing PID demonstrations at {DEMOS_DIR / 'pid_demonstrations.pkl'}")
+        pid_trajectories = serialize.load(str(DEMO_PATH))
+        return pid_trajectories
+    else:
+        print(f"⚠ No existing PID demonstrations found at {DEMO_PATH}")
+
+    env_pid = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
+
+    rng = np.random.default_rng(42)
+    pid_trajectories = []
+    builder = util.TrajectoryBuilder()
+    for j in tqdm.tqdm(range(n_episodes), desc="Generating PID Demonstrations"):
+        obs, _ = env_pid.reset()
+        builder.start_episode(initial_obs=obs)
+        for t in range(200):
+            action = env_pid.suboptimal_expert(obs)
+            next_obs, reward, _, _, info = env_pid.step(action)
+            builder.add_step(action=action, next_obs=next_obs, reward=reward, info=info)
+            obs = next_obs
+        pid_trajectories.append(builder.finish(terminal=True))
+    serialize.save(str(DEMOS_DIR / "pid_demonstrations.pkl"), pid_trajectories)
+    print(f"✓ Saved PID demonstrations to {DEMOS_DIR / 'pid_demonstrations.pkl'}")
+    env_pid.close()
+
+    return pid_trajectories
 
 def generate_MPC_demonstrations(
     env_id: str = "DoubleIntegrator-v0",
@@ -681,6 +737,9 @@ def main():
         n_episodes=200,
     )
 
+    # Step 1a: Generate suboptimal demonstrations using PID
+    pid_demonstrations = 
+
     # Step 1b: Train BC policy on MPC demonstrations, rollout policy
     bc_policy, demonstrations = train_BC_on_MPC_demonstrations(
         demonstrations=mpc_demonstrations,
@@ -741,7 +800,7 @@ def main():
         n_rollouts_per_noise=10,
         bc_epochs=50,
         rl_total_timesteps=100_000,
-        run_individual_steps=[4],  # Change to None to run full training
+        run_individual_steps=[6],  # Change to None to run full training
         just_plot_noisy_rollouts=False,
         bc_policy=bc_policy,
         robust_mpc=robust_tube_mpc,

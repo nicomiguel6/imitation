@@ -11,13 +11,14 @@ import pytope
 def main():
 
     model_type = 'continuous' # either 'discrete' or 'continuous'
+    t_step = 0.5
     model = do_mpc.model.LinearModel(model_type)
 
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
     _u = model.set_variable(var_type='_u', var_name='u', shape=(1,1))
 
-    A = np.array([[1,1],[0,1]])
-    B = np.array([[0.5], [1]])
+    A = np.array([[0,1],[0,0]])
+    B = np.array([[0], [1]])
     Q = np.diag([1,1])
     R = 0.1
 
@@ -30,11 +31,11 @@ def main():
     # Build the model
     model.setup()
 
-    discrete_model = model.discretize(t_step=1.0)
+    discrete_model = model.discretize(t_step=t_step)
     A_d = discrete_model._A
     B_d = discrete_model._B
-    A_d = A
-    B_d = B
+    # A_d = A
+    # B_d = B
 
     P = solve_discrete_are(A_d, B_d, Q, R)
     K = -np.linalg.inv(B_d.T @ P @ B_d + R) @ (B_d.T @ P @ A_d)  # LQR gain
@@ -60,8 +61,8 @@ def main():
     H_mat = np.array([list(row) for row in H], dtype=float)
     W_b, W_A = H_mat[:,0], -H_mat[:,1:]
 
-    A_x, b_x = box_to_Ab(np.array([[-10.0], [-2.0]]), np.array([[2.0], [2.0]]))
-    A_u, b_u = box_to_Ab(np.array([-1.0]), np.array([1.0]))
+    A_x, b_x = box_to_Ab(np.array([[-10.0], [-10.0]]), np.array([[10.0], [10.0]]))
+    A_u, b_u = box_to_Ab(np.array([-2.0]), np.array([2.0]))
 
     # Compute mrpi set
     # test other method
@@ -87,11 +88,12 @@ def main():
     setup_mpc = {
         'n_robust': 0,
         'n_horizon': 10,
-        't_step': 0.1,
-        'state_discretization': 'discrete',
+        't_step': t_step,
+        'state_discretization': 'collocation',
+        'collocation_type': 'radau',
+        'collocation_deg': 3,
+        'collocation_ni': 1,
         'store_full_solution': True,
-        # Use MA27 linear solver in ipopt for faster calculations:
-        # 'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}
     }
 
     mpc.set_param(**setup_mpc)
@@ -132,7 +134,7 @@ def main():
 
     simulator = do_mpc.simulator.Simulator(model)
 
-    simulator.set_param(t_step = 0.1)
+    simulator.set_param(t_step = t_step)
     simulator.setup()
 
     # Seed
