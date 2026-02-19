@@ -8,5 +8,50 @@
     "noise_level": 0.1,
     "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
     "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 0.2,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 0.3,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 0.4,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 0.5,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 0.6,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 0.7,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 0.8,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 0.9,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
+  },
+  {
+    "noise_level": 1.0,
+    "base_policy_path": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_policies/base_policy.pt",
+    "noise_injector": "EpsilonGreedyNoiseInjector"
   }
 ]

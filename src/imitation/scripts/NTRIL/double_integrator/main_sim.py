@@ -37,7 +37,8 @@ from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC, RobustTubeMPCPolicy
 from imitation.data.types import TrajectoryWithRew
 from imitation.data.types import Trajectory
-
+from imitation.scripts.NTRIL.double_integrator.double_integrator import DoubleIntegratorSuboptimalPolicy
+from imitation.policies.base import NonTrainablePolicy
 
 import matplotlib.pyplot as plt
 
@@ -437,7 +438,8 @@ def generate_expert_demonstrations(
 
 
 def run_ntril_training(
-    demonstrations,
+    suboptimal_policy: Optional[NonTrainablePolicy] = None,
+    demonstrations: Optional[Sequence[TrajectoryWithRew]] = None,
     env_id: str = "DoubleIntegrator-v0",
     save_dir: str = "./ntril_outputs",
     noise_levels: tuple = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5),
@@ -446,27 +448,37 @@ def run_ntril_training(
     rl_total_timesteps: int = 100000,
     run_individual_steps: Optional[list] = None,
     just_plot_noisy_rollouts: bool = False,
-    bc_policy: Optional[bc.BC] = None,
     noisy_rollouts: Optional[Sequence[Trajectory]] = None,
     robust_mpc: Optional[RobustTubeMPC] = None,
 ):
     """Run NTRIL training using the NTRILTrainer class.
 
+    Exactly one of ``demonstrations`` or ``bc_policy`` must be provided:
+
+    * ``demonstrations``: raw suboptimal trajectory data; Step 1 will train a
+      BC policy on it.
+    * ``bc_policy``: a pre-trained suboptimal :class:`bc.BC` instance; Step 1
+      is skipped and the policy is used directly for noise injection.
+
     Args:
-        demonstrations: Expert demonstration trajectories
-        env_id: Gymnasium environment ID
-        save_dir: Directory to save outputs
-        noise_levels: Sequence of noise levels for data augmentation
-        n_rollouts_per_noise: Number of rollouts per noise level
-        bc_epochs: Number of epochs for BC training
-        rl_total_timesteps: Total timesteps for final RL training
-        run_individual_steps: List of steps to run individually
-        just_plot_noisy_rollouts: Whether to just plot noisy rollouts (warning, this will override run_individual_steps)
-        bc_policy: Optional pre-trained BC policy (needed for steps 2+)
-        robust_mpc: Optional robust MPC instance (needed for step 3)
+        demonstrations: Suboptimal trajectory data (mutually exclusive with
+            ``bc_policy``).
+        env_id: Gymnasium environment ID.
+        save_dir: Directory to save outputs.
+        noise_levels: Sequence of noise levels for data augmentation.
+        n_rollouts_per_noise: Number of rollouts per noise level.
+        bc_epochs: Number of epochs for BC training (ignored when
+            ``bc_policy`` is provided).
+        rl_total_timesteps: Total timesteps for final RL training.
+        run_individual_steps: List of specific pipeline steps to run.
+        just_plot_noisy_rollouts: Debug flag to visualise noisy rollouts only.
+        bc_policy: Pre-trained suboptimal :class:`bc.BC` instance (mutually
+            exclusive with ``demonstrations``).
+        noisy_rollouts: Pre-generated noisy rollouts (optional).
+        robust_mpc: Robust MPC instance required for Step 3.
 
     Returns:
-        Trained NTRILTrainer instance
+        Trained :class:`NTRILTrainer` instance.
     """
     print("\n" + "=" * 70)
     print("STEP 2: Running NTRIL Training Pipeline")
@@ -499,8 +511,7 @@ def run_ntril_training(
     print(f"  Noise levels: {noise_levels}")
     print(f"  Rollouts per noise level: {n_rollouts_per_noise}")
 
-    ntril_trainer = NTRILTrainer(
-        demonstrations=demonstrations,
+    common_kwargs = dict(
         venv=venv,
         custom_logger=custom_logger,
         noise_levels=noise_levels,
@@ -511,9 +522,16 @@ def run_ntril_training(
         irl_lr=1e-3,
         save_dir=save_dir,
     )
-    
-    if bc_policy is not None:
-        ntril_trainer.bc_policy = bc_policy.policy
+
+    if suboptimal_policy is not None:
+        # A pre-trained suboptimal policy is already available — skip BC.
+        ntril_trainer = NTRILTrainer.from_policy(suboptimal_policy, **common_kwargs)
+    elif demonstrations is not None:
+        # Raw trajectory data supplied — BC will be trained in Step 1.
+        ntril_trainer = NTRILTrainer.from_demonstrations(demonstrations, **common_kwargs)
+    else:
+        raise ValueError("Either 'demonstrations' or 'suboptimal_policy' must be provided.")
+
     if robust_mpc is not None:
         ntril_trainer.robust_mpc = robust_mpc
 
@@ -521,14 +539,19 @@ def run_ntril_training(
     irl_train_kwargs = {}
     rl_train_kwargs = {}
     
-    if just_plot_noisy_rollouts: # hijack the training pipeline to just plot small noisy rollouts
+    if just_plot_noisy_rollouts:
         print("Just plotting noisy rollouts...")
         device = "cuda"
-        # Load bc policy
+        # Resolve the base policy: use the one passed in, or load from disk.
+        if suboptimal_policy is not None:
+            base_plot_policy = suboptimal_policy
+        else:
+            base_plot_policy = bc.reconstruct_policy(
+                os.path.join(save_dir, "initial_BC_policy"), device=device
+            )
         for noise_level in noise_levels:
-            bc_policy = bc.reconstruct_policy(os.path.join(save_dir, "initial_BC_policy"), device=device)
             noisy_policy = EpsilonGreedyNoiseInjector().inject_noise(
-                bc_policy, noise_level=noise_level
+                base_plot_policy, noise_level=noise_level
             )
             rollouts = rollout.rollout(
                 noisy_policy, venv, rollout.make_sample_until(min_episodes=2), rng=rng
@@ -577,8 +600,8 @@ def run_ntril_training(
 
             elif step_num == 2: # Generates noisy rollouts from BC policy
                 # Check if bc policy is provided
-                if bc_policy is None:
-                    raise ValueError("BC policy is required for step 2")
+                if suboptimal_policy is None:
+                    raise ValueError("Suboptimal policy is required for step 2")
                 print("Step 2: Generating noisy rollouts...")
                 _, rollout_stats = ntril_trainer._generate_noisy_rollouts()
                 step_results["rollouts"] = rollout_stats
@@ -724,29 +747,35 @@ def main():
 
     rngs = np.random.default_rng()
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
+    ghost_env = gym.make(env_id)
+
 
     print("\n" + "=" * 70)
     print("NTRIL PIPELINE FOR DOUBLEINTEGRATOR-V0")
     print("=" * 70)
     print(f"\nEnvironment: {env_id}")
 
-    # Step 1a: Generate MPC demonstrations
-    mpc_demonstrations = generate_MPC_demonstrations(
-        env_id=env_id,
-        device=str(device),
-        n_episodes=200,
+    # # Step 1a: Generate MPC demonstrations
+    # mpc_demonstrations = generate_MPC_demonstrations(
+    #     env_id=env_id,
+    #     device=str(device),
+    #     n_episodes=200,
+    # )
+
+    # # Step 1b: Train BC policy on MPC demonstrations, rollout policy
+    # bc_policy, demonstrations = train_BC_on_MPC_demonstrations(
+    #     demonstrations=mpc_demonstrations,
+    #     env_id=env_id,
+    #     device=str(device),
+    #     force_retrain=False,
+    # )
+
+    # Step 1: Set up suboptimal PID as initial policy
+    suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
+        observation_space=ghost_env.observation_space,
+        action_space=ghost_env.action_space,
     )
 
-    # Step 1a: Generate suboptimal demonstrations using PID
-    pid_demonstrations = 
-
-    # Step 1b: Train BC policy on MPC demonstrations, rollout policy
-    bc_policy, demonstrations = train_BC_on_MPC_demonstrations(
-        demonstrations=mpc_demonstrations,
-        env_id=env_id,
-        device=str(device),
-        force_retrain=False,
-    )
 
     '''The use of BC for the MPC demonstrations is not necessary, but it is a good way to get a policy that is close to the MPC policy. 
     Clearly, Actor Critic PPO on the Double Integrator Environment is harder to train to get an expert policy in. 
@@ -766,12 +795,12 @@ def main():
     #     force_retrain=True,
     # )
 
-    # Step 1.5: Collect reward statistics on suboptimal demonstrations
-    print("\nCollecting reward statistics on suboptimal demonstrations...")
-    returns = [sum(traj.rews) for traj in demonstrations]
-    lengths = [len(traj) for traj in demonstrations]
-    print(f"  Mean return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
-    print(f"  Mean length: {np.mean(lengths):.2f} ± {np.std(lengths):.2f}")
+    # # Step 1.5: Collect reward statistics on suboptimal demonstrations
+    # print("\nCollecting reward statistics on suboptimal demonstrations...")
+    # returns = [sum(traj.rews) for traj in demonstrations]
+    # lengths = [len(traj) for traj in demonstrations]
+    # print(f"  Mean return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
+    # print(f"  Mean length: {np.mean(lengths):.2f} ± {np.std(lengths):.2f}")
 
     # Step 2: Set up robust tube MPC
     robust_tube_mpc = RobustTubeMPC(
@@ -793,16 +822,14 @@ def main():
 
     # Step 2: Run NTRIL training (Choose step 3 to test sample augmentation)
     ntril_trainer = run_ntril_training(
-        demonstrations=demonstrations,
+        suboptimal_policy=suboptimal_policy,
         env_id=env_id,
         save_dir=str(SAVE_DIR),
-        noise_levels=(0.0, 0.1),
+        noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
         n_rollouts_per_noise=10,
-        bc_epochs=50,
         rl_total_timesteps=100_000,
-        run_individual_steps=[6],  # Change to None to run full training
+        run_individual_steps=[2],
         just_plot_noisy_rollouts=False,
-        bc_policy=bc_policy,
         robust_mpc=robust_tube_mpc,
     )
 

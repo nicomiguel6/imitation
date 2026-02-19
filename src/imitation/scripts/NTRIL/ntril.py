@@ -7,7 +7,8 @@ import logging
 import os
 import functools
 from datetime import datetime
-from typing import Any, Dict, Mapping, Optional, Sequence
+from enum import Enum, auto
+from typing import Any, Dict, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import torch as th
@@ -29,16 +30,38 @@ from matplotlib import pyplot as plt
 
 logger = logging.getLogger(__name__)
 
+# Type alias for the two supported suboptimal expert inputs.
+SuboptimalExpert = Union[Sequence[types.Trajectory], policies.BasePolicy]
+
+
+class _ExpertMode(Enum):
+    DEMONSTRATIONS = auto()  # trajectories provided; BC will be trained
+    POLICY = auto()          # policy provided directly; BC step is skipped
+
+
 @dataclasses.dataclass
 class NTRILTrainer(base.BaseImitationAlgorithm):
-    """Noisy Trajectory Ranked Imitation Learning trainer."""
-    
-    # Required fields
-    demonstrations: Sequence[types.Trajectory]
-    venv: vec_env.VecEnv
+    """Noisy Trajectory Ranked Imitation Learning trainer.
 
+    Do not instantiate directly.  Use one of the two factory class-methods:
+
+    * ``NTRILTrainer.from_demonstrations(demonstrations, venv, ...)``
+      – Step 1 trains a BC policy on the supplied trajectory data.
+
+    * ``NTRILTrainer.from_policy(policy, venv, ...)``
+      – Step 1 is skipped; the supplied policy is used as the initial
+        suboptimal policy for noise injection.
+    """
+
+    # --- internal fields set by the factory constructors ---
+    # Exactly one of (_demonstrations, _suboptimal_policy) is not None.
+    _demonstrations: Optional[Sequence[types.Trajectory]]
+    _suboptimal_policy: Optional[policies.BasePolicy]
+    _expert_mode: _ExpertMode
+
+    venv: vec_env.VecEnv
     custom_logger: Optional[imit_logger.HierarchicalLogger] = None
-    bc_policy: Optional[policies.BasePolicy] = None # If we already have a BC policy that we want to use as the initial policy, we can pass it here.
+
     # Training configuration
     noise_levels: Sequence[float] = dataclasses.field(
         default_factory=lambda: (0.0, 0.1, 0.2, 0.3, 0.4, 0.5)
@@ -53,7 +76,62 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     irl_lr: float = 1e-3
     save_dir: Optional[str] = None
     rng: int = 42
-    
+
+    # ------------------------------------------------------------------
+    # Factory constructors
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_demonstrations(
+        cls,
+        demonstrations: Sequence[types.Trajectory],
+        venv: vec_env.VecEnv,
+        **kwargs,
+    ) -> "NTRILTrainer":
+        """Create a trainer that learns a BC policy from trajectory data.
+
+        Step 1 of the NTRIL pipeline will train a BC policy on
+        ``demonstrations``.  All subsequent steps proceed normally.
+
+        Args:
+            demonstrations: Suboptimal trajectory data to clone.
+            venv: Vectorised training environment.
+            **kwargs: Forwarded to :class:`NTRILTrainer`.
+        """
+        return cls(
+            _demonstrations=demonstrations,
+            _suboptimal_policy=None,
+            _expert_mode=_ExpertMode.DEMONSTRATIONS,
+            venv=venv,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_policy(
+        cls,
+        policy: policies.BasePolicy,
+        venv: vec_env.VecEnv,
+        **kwargs,
+    ) -> "NTRILTrainer":
+        """Create a trainer that uses a pre-existing suboptimal policy.
+
+        Step 1 of the NTRIL pipeline is skipped; ``policy`` is used directly
+        as the base policy for noise injection.
+
+        Args:
+            policy: A ``stable_baselines3`` compatible policy that represents
+                the suboptimal expert.
+            venv: Vectorised training environment.
+            **kwargs: Forwarded to :class:`NTRILTrainer`.
+        """
+        return cls(
+            _demonstrations=None,
+            _suboptimal_policy=policy,
+            _expert_mode=_ExpertMode.POLICY,
+            venv=venv,
+            **kwargs,
+        )
+
     def __post_init__(self):
         """Initialize components after dataclass creation."""
         # Device setup
@@ -62,7 +140,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         else:
             device = th.device("cpu")
         object.__setattr__(self, 'device', device)
-        
+
         # Save dir setup
         if self.save_dir is None:
             save_dir = os.path.join(
@@ -72,22 +150,29 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             save_dir = os.path.abspath(self.save_dir)
         os.makedirs(save_dir, exist_ok=True)
         object.__setattr__(self, 'save_dir', save_dir)
-        
+
         object.__setattr__(self, 'rng', np.random.default_rng(self.rng))
-        # BC trainer - policy will be auto-created
-        bc_trainer = bc.BC(
-            observation_space=self.venv.observation_space,
-            action_space=self.venv.action_space,
-            policy=None,  
-            demonstrations=self.demonstrations,
-            batch_size=self.bc_batch_size,
-            device=device,
-            custom_logger=self.custom_logger,
-            rng=self.rng,
-            **(self.bc_train_kwargs or {}),
-        )
-        object.__setattr__(self, 'bc_trainer', bc_trainer)
-        
+
+        # BC trainer — only created when we have demonstrations to train on.
+        if self._expert_mode is _ExpertMode.DEMONSTRATIONS:
+            bc_trainer = bc.BC(
+                observation_space=self.venv.observation_space,
+                action_space=self.venv.action_space,
+                policy=None,
+                demonstrations=self._demonstrations,
+                batch_size=self.bc_batch_size,
+                device=device,
+                custom_logger=self.custom_logger,
+                rng=self.rng,
+                **(self.bc_train_kwargs or {}),
+            )
+            object.__setattr__(self, 'bc_trainer', bc_trainer)
+            object.__setattr__(self, 'bc_policy', None)
+        else:
+            # Policy supplied directly: pre-populate bc_policy and skip BC.
+            object.__setattr__(self, 'bc_trainer', None)
+            object.__setattr__(self, 'bc_policy', self._suboptimal_policy)
+
         # Reward network
         if self.reward_net is None:
             reward_net = TrajectoryRewardNet(
@@ -99,10 +184,10 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 use_done=False,
             )
             object.__setattr__(self, 'reward_net', reward_net)
-        
+
         # Move reward net to device
         self.reward_net.to(device)
-        
+
         # Storage for training artifacts
         object.__setattr__(self, 'noisy_rollouts', [])
         object.__setattr__(self, 'augmented_data', [])
@@ -163,22 +248,33 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         return stats
 
     def _train_bc_policy(self, **kwargs) -> Dict[str, Any]:
-        """Train the initial BC policy."""
-        self.save_initial_bc_policy_dir = os.path.join(self.save_dir, "initial_BC_policy")
+        """Obtain the initial suboptimal policy (Step 1).
 
-        # check if it already exists
-        if os.path.exists(self.save_initial_bc_policy_dir):
-            print("Loading existing BC policy...")
-            self.bc_policy = bc.reconstruct_policy(
-                self.save_initial_bc_policy_dir, device=self.device)
+        * **Demonstrations mode**: trains (or loads a cached) BC policy from
+          the supplied trajectory data.
+        * **Policy mode**: the policy was supplied at construction time, so
+          this step only evaluates it and returns statistics.
+        """
+        save_initial_bc_policy_dir = os.path.join(self.save_dir, "initial_BC_policy")
+        object.__setattr__(self, 'save_initial_bc_policy_dir', save_initial_bc_policy_dir)
+
+        if self._expert_mode is _ExpertMode.POLICY:
+            # Policy was provided directly — nothing to train.
+            logger.info("Skipping BC training: suboptimal policy was provided directly.")
         else:
-            print("Training BC policy...")
-            self.bc_trainer.train(**kwargs)
-            self.bc_policy = self.bc_trainer.policy
+            # Demonstrations mode: train or load a cached BC policy.
+            if os.path.exists(save_initial_bc_policy_dir):
+                print("Loading existing BC policy...")
+                self.bc_policy = bc.reconstruct_policy(
+                    save_initial_bc_policy_dir, device=self.device)
+            else:
+                print("Training BC policy...")
+                self.bc_trainer.train(**kwargs)
+                self.bc_policy = self.bc_trainer.policy
 
-        util.save_policy(self.bc_policy, self.save_initial_bc_policy_dir)
+            util.save_policy(self.bc_policy, save_initial_bc_policy_dir)
 
-        # Evaluate BC policy
+        # Evaluate the policy regardless of how it was obtained.
         bc_rollouts = rollout.rollout(
             self.bc_policy,
             self.venv,
@@ -494,7 +590,6 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         """Return the current policy."""
         if self.bc_policy is not None:
             return self.bc_policy
-        elif self.bc_trainer.policy is not None:
+        if self.bc_trainer is not None and self.bc_trainer.policy is not None:
             return self.bc_trainer.policy
-        else:
-            raise ValueError("No policy available - train BC first")
+        raise ValueError("No policy available — call train() or _train_bc_policy() first.")

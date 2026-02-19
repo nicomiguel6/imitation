@@ -11,7 +11,7 @@ from typing import Dict, Optional, Any, Tuple
 import numpy as np
 import gymnasium as gym
 from gymnasium.spaces import Box
-
+from imitation.policies.base import NonTrainablePolicy
 from scipy.linalg import solve_discrete_are
 
 
@@ -258,4 +258,10 @@ class DoubleIntegratorEnv(gym.Env):
         return acceleration.astype(np.float32)
 
 
+class DoubleIntegratorSuboptimalPolicy(NonTrainablePolicy):
+    def __init__(self, observation_space: gym.Space, action_space: gym.Space):
+        super().__init__(observation_space, action_space)
+        self.env = DoubleIntegratorEnv()
 
+    def _choose_action(self, obs: np.ndarray) -> np.ndarray:
+        return self.env.suboptimal_expert(obs)
