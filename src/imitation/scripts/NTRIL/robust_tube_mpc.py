@@ -104,9 +104,9 @@ class RobustTubeMPC:
         self.us = []
 
         if reference_trajectory is None: # default to all zeros if none is provided, this changes the cost function to a minimization problem instead of tracking problem
-            self.reference_trajectory = types.Trajectory(obs=np.zeros((201, self.state_dim)), acts=np.zeros((200, self.action_dim)))
+            self.reference_trajectory = types.Trajectory(obs=np.zeros((self.episode_length + 1, self.state_dim)), acts=np.zeros((self.episode_length, self.action_dim)), infos=np.array([{}] * self.episode_length), terminal=True)
         else:
-            self.reference_trajectory = reference_trajectory.copy()
+            self.reference_trajectory = reference_trajectory
     
     def setup(self):
         """Initialize necessary objects for setting up MPC"""
@@ -126,6 +126,12 @@ class RobustTubeMPC:
         nominal_x_next = self.A @ _x + self.B @ _u
 
         nominal_model.set_rhs("x", nominal_x_next)
+
+        # ------------ REFERENCE TRAJECTORY SETUP ------------- #
+        # Shape is (state_dim, 1): a single reference per prediction step.
+        # tvp_fun assigns a different value for each k in [0, n_horizon].
+        state_set_point = nominal_model.set_variable(var_type="_tvp", var_name="state_set_point", shape=(self.state_dim, 1))
+        control_set_point = nominal_model.set_variable(var_type="_tvp", var_name="control_set_point", shape=(self.action_dim, 1))
 
         nominal_model.setup()
 
@@ -174,9 +180,6 @@ class RobustTubeMPC:
                 self.A_x, self.b_x = box_to_Ab(self.state_bounds[0], self.state_bounds[1])
                 self.A_u, self.b_u = box_to_Ab(self.control_bounds[0], self.control_bounds[1])
 
-        # ------------ REFERENCE TRAJECTORY SETUP ------------- #
-        state_set_point = nominal_model.set_variable(var_type="_tvp", var_name="state_set_point")
-        control_set_point = nominal_model.set_variable(var_type="_tvp", var_name="control_set_point")
 
         # ------------ CONTROLLER SETUP ------------- #
         # solver for nominal control
@@ -230,22 +233,27 @@ class RobustTubeMPC:
         mpc.set_objective(mterm=mterm, lterm=lterm)
         mpc.set_rterm(ca.SX(self.R))
 
+        # ------------ TIME VARYING PARAMETERS (TVP) SETUP ------------- #
+        # set up time varying parameters (tvp)
+        tvp_template = mpc.get_tvp_template()
+
+        def tvp_fun(t_now):
+            t_idx = int(t_now / self.time_step)
+            n_obs = len(self.reference_trajectory.obs)
+            n_acts = len(self.reference_trajectory.acts)
+            for k in range(self.horizon + 1):
+                obs_idx = min(t_idx + k, n_obs - 1)
+                act_idx = min(t_idx + k, n_acts - 1)
+                tvp_template["_tvp", k, "state_set_point"] = self.reference_trajectory.obs[obs_idx].reshape(-1, 1)
+                tvp_template["_tvp", k, "control_set_point"] = self.reference_trajectory.acts[act_idx].reshape(-1, 1)
+            return tvp_template
+
+        mpc.set_tvp_fun(tvp_fun)
 
         mpc.setup()
 
         self.mpc = mpc
 
-        # ------------ TIME VARYING PARAMETERS (TVP) SETUP ------------- #
-        # set up time varying parameters (tvp)
-        tvp_template = self.mpc.get_tvp_template()
-
-        def tvp_fun(t_now):
-            for k in range(self.episode_length):
-                tvp_template["_tvp", k, "state_set_point"] = self.reference_trajectory.obs[k]
-                tvp_template["_tvp", k, "control_set_point"] = self.reference_trajectory.acts[k] 
-            return tvp_template
-
-        self.mpc.set_tvp_fun(tvp_fun)
 
         if self.disturbance_bound is not None:
 
@@ -298,7 +306,26 @@ class RobustTubeMPC:
             "Nominal and disturbed models, controller, and simulator setup completed!"
         )
 
-    
+    def set_reference_trajectory(self, reference_trajectory: types.Trajectory) -> None:
+        """Update the reference trajectory without rebuilding the MPC problem.
+
+        The compiled NLP, MRPI sets, and all CasADi machinery are reused.
+        Only the data read by tvp_fun at each solve step changes.
+
+        Args:
+            reference_trajectory: New reference trajectory to track.
+        """
+        self.reference_trajectory = reference_trajectory
+        # Reset internal time so t_idx starts at 0 for the new trajectory.
+        if self.mpc is not None:
+            self.mpc.reset_history()
+            self.mpc.t0 = 0.0
+        if self.simulator is not None:
+            self.simulator.reset_history()
+            self.simulator.t0 = 0.0
+        self.xs = []
+        self.us = []
+
     def solve_mpc(
         self, state: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:

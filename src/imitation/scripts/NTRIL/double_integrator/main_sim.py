@@ -828,10 +828,26 @@ def main():
         noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
         n_rollouts_per_noise=10,
         rl_total_timesteps=100_000,
-        run_individual_steps=[2],
+        run_individual_steps=[3],
         just_plot_noisy_rollouts=False,
         robust_mpc=augmentation_robust_tube_mpc,
     )
+
+    # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
+    for noise_level in ntril_trainer.noise_levels:
+        nominal_noisy_rollout = ntril_trainer.noisy_rollouts[noise_level][0]
+        rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[noise_level][0]
+        
+        fig, ax = plt.subplots()
+        ax.plot(nominal_noisy_rollout.obs[:, 0], nominal_noisy_rollout.obs[:, 1], label="Nominal Noisy Rollout")
+        ax.plot(rtmpc_trajectory.obs[:, 0], rtmpc_trajectory.obs[:, 1], label="RTMPC Trajectory")
+        ax.legend()
+        ax.set_xlabel("Position")
+        ax.set_ylabel("Velocity")
+        ax.set_title(f"Nominal Noisy Rollout vs RTMPC Trajectory at Noise Level {noise_level:.2f}")
+        plt.savefig(f"debug/plots/mpc/nominal_noisy_rollout_vs_rtmpc_trajectory_{noise_level}.png")
+        plt.close()
+        print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
 
 
     # # Step 3: Evaluate the trained policy

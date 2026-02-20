@@ -374,7 +374,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             "rollouts_per_level": [len(rollouts) for rollouts in self.noisy_rollouts],
         }
 
-    def _augment_data_with_mpc(self) -> List[List[List[types.TrajectoryWithRew]]]:
+    def _augment_data_with_mpc(self, force_recompute: bool = False) -> List[List[List[types.TrajectoryWithRew]]]:
         """Apply robust tube MPC to augment the noisy rollouts.
         Suppose we have S different noise levels. 
         For each noise level, we have K base trajectory rollouts of length T resulting from RTMPC.
@@ -401,22 +401,36 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
         So self.augmented_data[i][j] is the j-th augmented trajectory for the i-th noise level.
         """
+
+        # Check if augmented data already exists in the save directory
+        augmented_data_path = os.path.join(self.save_dir, "augmented_data")
+        if os.path.exists(augmented_data_path) and not force_recompute:
+            self.augmented_data = serialize.load(augmented_data_path)
+            return self.augmented_data
+
+        self.rtmpc_trajectories = []
         self.augmented_data = []
-        # total_augmented_transitions could be tracked here if needed for logging.
 
         for noise_idx, rollouts in enumerate(self.noisy_rollouts):
             noise_level = self.noise_levels[noise_idx]
             augmented_data_for_noise_level = []
+            rtmpc_trajectories_for_noise_level = []
 
             for traj_idx, traj in enumerate(rollouts):
                 # Apply robust tube MPC to each trajectory to get nominal trajectory
-                
-                rtmpc_trajectory = self.robust_mpc.solve_rtmpc(traj.obs[0], traj)
+                self.robust_mpc.set_reference_trajectory(traj)
+                rtmpc_trajectory = self._solve_rtmpc(traj.obs[0], traj)
+                rtmpc_trajectories_for_noise_level.append(rtmpc_trajectory)
+
+                # Augment from nominal trajectory to get augmented trajectories
                 augmented_trajectories = self.robust_mpc.augment_trajectory(
-                    traj
+                    rtmpc_trajectory
                 )
                 augmented_data_for_noise_level.extend(augmented_trajectories)
-
+            
+            # Save rtmpc_trajectories_for_noise_level to a file
+            serialize.save(os.path.join(self.save_dir, "rtmpc_trajectories", f"noise_{noise_level:.2f}.pkl"), rtmpc_trajectories_for_noise_level)
+            self.rtmpc_trajectories.append(rtmpc_trajectories_for_noise_level)
             # Save each augmented_data_for_noise_level to a file
             serialize.save(os.path.join(self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl"), augmented_data_for_noise_level)
             self.augmented_data.append(augmented_data_for_noise_level) 
@@ -579,29 +593,13 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     
     def _solve_rtmpc(self, initial_state: np.ndarray, reference_trajectory: types.Trajectory) -> types.TrajectoryWithRew:
 
-        self.rtmpc = RobustTubeMPC(
-            horizon = 10,
-            time_step = 1.0,
-            disturbance_bound = 0.1,
-            tube_radius = 0.05,
-            A = np.array([[0.0, 1.0], [0.0, 0.0]]),
-            B = np.array([[0.0], [1.0]]),
-            Q = np.diag([10.0, 1.0]),
-            R = 0.01*np.eye(1),
-            disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
-            state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-            control_bounds = (np.array([-2.0]), np.array([2.0])),
-            reference_trajectory = reference_trajectory,
-        )
-
-        self.rtmpc.setup()
-        self.rtmpc.mpc.x0 = initial_state
-        self.rtmpc.simulator.x0 = initial_state
-        self.rtmpc.mpc.set_initial_guess()
-
         current_noise_level = reference_trajectory.infos[0].get("noise_level")
         total_applied_noise_sum = reference_trajectory.infos[-1].get("total_applied_noise_sum")
 
+        self.robust_mpc.mpc.set_initial_guess()
+        self.robust_mpc.mpc.x0 = initial_state
+        self.robust_mpc.simulator.x0 = initial_state
+        
         state = initial_state
 
         builder = util.TrajectoryBuilder()
@@ -609,20 +607,20 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
         for t in range(len(reference_trajectory.obs)):
             # Compute nominal optimal control from MPC
-            u_nom = self.rtmpc.mpc.make_step(state)
+            u_nom = self.robust_mpc.mpc.make_step(state)
             
             # Predict nominal state (first predicted state in the horizon)
-            nominal_state = self.rtmpc.mpc.data.prediction(("_x", "x"))[:, 0]
+            nominal_state = self.robust_mpc.mpc.data.prediction(("_x", "x"))[:, 0]
 
             # Convert to column vectors for disturbance rejection control law
             state_col = np.asarray(state).reshape(-1, 1)
             nominal_col = np.asarray(nominal_state).reshape(-1, 1)
 
             # Compute applied control with disturbance rejection control law
-            applied_u = u_nom + self.rtmpc.K @ (state_col - nominal_col)
+            applied_u = u_nom + self.robust_mpc.K @ (state_col - nominal_col)
 
             # Simulate the next state using the simulator
-            next_state = self.rtmpc.simulator.make_step(u0=applied_u)
+            next_state = self.robust_mpc.simulator.make_step(u0=applied_u)
             state = next_state
 
             builder.add_step(action=applied_u.flatten(), next_obs=next_state.flatten(), reward=0.0, info={"noise_level": current_noise_level, "total_applied_noise_sum": total_applied_noise_sum})
