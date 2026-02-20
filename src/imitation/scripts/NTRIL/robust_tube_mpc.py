@@ -16,6 +16,7 @@ import pytope
 from imitation.data import types
 from imitation.policies.base import NonTrainablePolicy
 from imitation.util import util
+from imitation.data import types
 
 
 class RobustTubeMPC:
@@ -28,6 +29,7 @@ class RobustTubeMPC:
     def __init__(
         self,
         horizon: int = 10,
+        episode_length: int = 200,
         time_step: float = 0.1,
         disturbance_bound: Optional[float] = None,
         tube_radius: Optional[float] = None,
@@ -41,12 +43,14 @@ class RobustTubeMPC:
         linearization_method: str = "finite_difference",
         finite_diff_eps: float = 1e-6,
         initial_state: Optional[np.ndarray] = None,
+        reference_trajectory: Optional[types.Trajectory] = None,
     ):
         """Initialize Robust Tube MPC.
 
         Args:
             horizon: MPC prediction horizon
-            time_step: discretization time step
+            episode_length: Length of episode
+            time_step: discretization time step for MPC
             disturbance_bound: Bound for disturbance set
             tube_radius: Radius of the robust tube
             A: State Dynamics matrix
@@ -58,8 +62,10 @@ class RobustTubeMPC:
             control_bounds: Tuple of (lower_bound, upper_bound) for controls. If None, assumes no constraints.
             linearization_method: Method for linearizing dynamics
             finite_diff_eps: Epsilon for finite difference linearization
+            reference_trajectory: Reference trajectory to follow.
         """
         self.horizon = horizon
+        self.episode_length = episode_length
         self.time_step = time_step
 
         # Handle defaults for disturbance_bound and tube_radius if not given
@@ -97,6 +103,11 @@ class RobustTubeMPC:
         self.xs = []
         self.us = []
 
+        if reference_trajectory is None: # default to all zeros if none is provided, this changes the cost function to a minimization problem instead of tracking problem
+            self.reference_trajectory = types.Trajectory(obs=np.zeros((201, self.state_dim)), acts=np.zeros((200, self.action_dim)))
+        else:
+            self.reference_trajectory = reference_trajectory.copy()
+    
     def setup(self):
         """Initialize necessary objects for setting up MPC"""
 
@@ -163,7 +174,9 @@ class RobustTubeMPC:
                 self.A_x, self.b_x = box_to_Ab(self.state_bounds[0], self.state_bounds[1])
                 self.A_u, self.b_u = box_to_Ab(self.control_bounds[0], self.control_bounds[1])
 
-
+        # ------------ REFERENCE TRAJECTORY SETUP ------------- #
+        state_set_point = nominal_model.set_variable(var_type="_tvp", var_name="state_set_point")
+        control_set_point = nominal_model.set_variable(var_type="_tvp", var_name="control_set_point")
 
         # ------------ CONTROLLER SETUP ------------- #
         # solver for nominal control
@@ -209,17 +222,30 @@ class RobustTubeMPC:
         x = nominal_model.x["x"]
         u = nominal_model.u["u"]
 
-        lterm = x.T @ self.Q @ x + u.T @ self.R @ u
-        mterm = x.T @ self.P @ x
+        lterm = (x-nominal_model.tvp["state_set_point"]).T @ self.Q @ (x-nominal_model.tvp["state_set_point"]) + (u-nominal_model.tvp["control_set_point"]).T @ self.R @ (u-nominal_model.tvp["control_set_point"])
+        mterm = (x-nominal_model.tvp["state_set_point"]).T @ self.P @ (x-nominal_model.tvp["state_set_point"])
 
         mpc.settings.set_linear_solver("ma57")
         mpc.settings.supress_ipopt_output()
         mpc.set_objective(mterm=mterm, lterm=lterm)
         mpc.set_rterm(ca.SX(self.R))
 
+
         mpc.setup()
 
         self.mpc = mpc
+
+        # ------------ TIME VARYING PARAMETERS (TVP) SETUP ------------- #
+        # set up time varying parameters (tvp)
+        tvp_template = self.mpc.get_tvp_template()
+
+        def tvp_fun(t_now):
+            for k in range(self.episode_length):
+                tvp_template["_tvp", k, "state_set_point"] = self.reference_trajectory.obs[k]
+                tvp_template["_tvp", k, "control_set_point"] = self.reference_trajectory.acts[k] 
+            return tvp_template
+
+        self.mpc.set_tvp_fun(tvp_fun)
 
         if self.disturbance_bound is not None:
 
@@ -256,12 +282,23 @@ class RobustTubeMPC:
             self.simulator = do_mpc.simulator.Simulator(nominal_model)
 
         self.simulator.set_param(t_step=self.time_step)
+
+        # sim_tvp_template = self.simulator.get_tvp_template()
+
+        # def sim_tvp_fun(t_now):
+        #     sim_tvp_template['state_set_point'] = self.reference_trajectory.obs[t_now]
+        #     sim_tvp_template['control_set_point'] = self.reference_trajectory.acts[t_now]
+        #     return sim_tvp_template
+
+        # self.simulator.set_tvp_fun(sim_tvp_fun)
+
         self.simulator.setup()
 
         print(
             "Nominal and disturbed models, controller, and simulator setup completed!"
         )
 
+    
     def solve_mpc(
         self, state: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:

@@ -11,7 +11,7 @@ import pytope
 def main():
 
     model_type = 'continuous' # either 'discrete' or 'continuous'
-    t_step = 0.5
+    t_step = 1.0
     model = do_mpc.model.LinearModel(model_type)
 
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))

@@ -623,8 +623,8 @@ def run_ntril_training(
                 ntril_trainer.noisy_rollouts = noisy_rollouts
                 print("Step 3: Augmenting data with robust tube MPC...")
 
-                augmentation_stats = ntril_trainer._augment_data_with_mpc()
-                step_results["augmentation"] = augmentation_stats
+                augmentation_data = ntril_trainer._augment_data_with_mpc()
+                step_results["augmentation"] = augmentation_data
                 print("\nData augmentation complete")
 
             elif step_num == 4: # Builds ranked dataset
@@ -802,8 +802,8 @@ def main():
     # print(f"  Mean return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
     # print(f"  Mean length: {np.mean(lengths):.2f} ± {np.std(lengths):.2f}")
 
-    # Step 2: Set up robust tube MPC
-    robust_tube_mpc = RobustTubeMPC(
+    # Step 2: Set up robust tube MPC for data augmentation
+    augmentation_robust_tube_mpc = RobustTubeMPC(
         horizon = 10,
         time_step = 1.0,
         disturbance_bound = 0.1,
@@ -814,10 +814,10 @@ def main():
         R = 0.01*np.eye(1),
         disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-50.0]), np.array([50.0])),
+        control_bounds = (np.array([-2.0]), np.array([2.0])),
     )
 
-    robust_tube_mpc.setup()
+    augmentation_robust_tube_mpc.setup()
 
 
     # Step 2: Run NTRIL training (Choose step 3 to test sample augmentation)
@@ -830,7 +830,7 @@ def main():
         rl_total_timesteps=100_000,
         run_individual_steps=[2],
         just_plot_noisy_rollouts=False,
-        robust_mpc=robust_tube_mpc,
+        robust_mpc=augmentation_robust_tube_mpc,
     )
 
 
