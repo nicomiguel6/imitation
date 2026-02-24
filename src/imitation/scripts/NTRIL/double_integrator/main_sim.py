@@ -589,14 +589,18 @@ def run_ntril_training(
             print(f"{'='*60}")
 
             if step_num == 1: # Trains BC policy from suboptimal expert demonstrations
-                print("Step 1: Training BC policy from demonstrations...")
-                bc_stats = ntril_trainer._train_bc_policy(
-                    n_epochs=bc_epochs, progress_bar=True
-                )
-                step_results["bc"] = bc_stats
-                print("\nBC Training Stats:")
-                for key, value in bc_stats.items():
-                    print(f"  {key}: {value}")
+                if suboptimal_policy:
+                    print("Step 1: Skipping BC policy training as suboptimal policy is provided")
+                    step_results["bc"] = None
+                else:
+                    print("Step 1: Training BC policy from demonstrations...")
+                    bc_stats = ntril_trainer._train_bc_policy(
+                        n_epochs=bc_epochs, progress_bar=True
+                    )
+                    step_results["bc"] = bc_stats
+                    print("\nBC Training Stats:")
+                    for key, value in bc_stats.items():
+                        print(f"  {key}: {value}")
 
             elif step_num == 2: # Generates noisy rollouts from BC policy
                 # Check if bc policy is provided
@@ -623,8 +627,9 @@ def run_ntril_training(
                 ntril_trainer.noisy_rollouts = noisy_rollouts
                 print("Step 3: Augmenting data with robust tube MPC...")
 
-                augmentation_data = ntril_trainer._augment_data_with_mpc()
+                augmentation_data, rtmpc_trajectories = ntril_trainer._augment_data_with_mpc(force_recompute=True)
                 step_results["augmentation"] = augmentation_data
+                step_results["rtmpc_trajectories"] = rtmpc_trajectories
                 print("\nData augmentation complete")
 
             elif step_num == 4: # Builds ranked dataset
@@ -803,7 +808,7 @@ def main():
     # print(f"  Mean length: {np.mean(lengths):.2f} ± {np.std(lengths):.2f}")
 
     # Step 2: Set up robust tube MPC for data augmentation
-    augmentation_robust_tube_mpc = RobustTubeMPC(
+    robust_tube_mpc = RobustTubeMPC(
         horizon = 10,
         time_step = 1.0,
         disturbance_bound = 0.1,
@@ -817,7 +822,7 @@ def main():
         control_bounds = (np.array([-2.0]), np.array([2.0])),
     )
 
-    augmentation_robust_tube_mpc.setup()
+    robust_tube_mpc.setup()
 
 
     # Step 2: Run NTRIL training (Choose step 3 to test sample augmentation)
@@ -828,24 +833,29 @@ def main():
         noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
         n_rollouts_per_noise=10,
         rl_total_timesteps=100_000,
-        run_individual_steps=[3],
+        run_individual_steps=[1,2,3],
         just_plot_noisy_rollouts=False,
-        robust_mpc=augmentation_robust_tube_mpc,
+        robust_mpc=robust_tube_mpc,
     )
 
     # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
-    for noise_level in ntril_trainer.noise_levels:
-        nominal_noisy_rollout = ntril_trainer.noisy_rollouts[noise_level][0]
-        rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[noise_level][0]
+    mpc_plot_dir = SCRIPT_DIR / "debug" / "plots" / "mpc"
+    mpc_plot_dir.mkdir(parents=True, exist_ok=True)
+    for idx, noise_level in enumerate(ntril_trainer.noise_levels):
+        nominal_noisy_rollout = ntril_trainer.noisy_rollouts[idx][0]
+        rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]
         
         fig, ax = plt.subplots()
-        ax.plot(nominal_noisy_rollout.obs[:, 0], nominal_noisy_rollout.obs[:, 1], label="Nominal Noisy Rollout")
-        ax.plot(rtmpc_trajectory.obs[:, 0], rtmpc_trajectory.obs[:, 1], label="RTMPC Trajectory")
+        ax.plot(nominal_noisy_rollout.obs[:, 0], label="Nominal Noisy Rollout")
+        ax.plot(rtmpc_trajectory.obs[:, 0], label="RTMPC Trajectory")
+        # sdet adjusted state bounds
+        ax.axhline(y=-robust_tube_mpc.b_x_t[1], color="r", linestyle="--", linewidth=1)
+        ax.axhline(y=robust_tube_mpc.b_x_t[3], color="r", linestyle="--", linewidth=1)
         ax.legend()
-        ax.set_xlabel("Position")
-        ax.set_ylabel("Velocity")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Position")
         ax.set_title(f"Nominal Noisy Rollout vs RTMPC Trajectory at Noise Level {noise_level:.2f}")
-        plt.savefig(f"debug/plots/mpc/nominal_noisy_rollout_vs_rtmpc_trajectory_{noise_level}.png")
+        plt.savefig(mpc_plot_dir / f"nominal_comparison_{noise_level:.2f}.png")
         plt.close()
         print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
 

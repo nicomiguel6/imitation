@@ -39,9 +39,9 @@ class DoubleIntegratorEnv(gym.Env):
     def __init__(
         self,
         dt: float = 1.0,
-        max_position: float = 10.0,
-        max_velocity: float = 10.0,
-        max_acceleration: float = 2.0,
+        max_position: float = 50.0,
+        max_velocity: float = 50.0,
+        max_acceleration: float = 20.0,
         target_position: float = 0.0,
         position_tolerance: float = 0.1,
         velocity_tolerance: float = 0.1,
@@ -182,7 +182,7 @@ class DoubleIntegratorEnv(gym.Env):
         # Important: write clipped values back to internal state.
         # Otherwise self.state can silently diverge even though the returned values look bounded.
         self.state = np.array([position, velocity], dtype=np.float32)
-
+        # self.state = self.state.astype(np.float32)
         self.step_count += 1
 
         # Compute reward (negative cost)

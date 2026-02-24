@@ -401,15 +401,23 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
         So self.augmented_data[i][j] is the j-th augmented trajectory for the i-th noise level.
         """
-
-        # Check if augmented data already exists in the save directory
-        augmented_data_path = os.path.join(self.save_dir, "augmented_data")
-        if os.path.exists(augmented_data_path) and not force_recompute:
-            self.augmented_data = serialize.load(augmented_data_path)
-            return self.augmented_data
-
         self.rtmpc_trajectories = []
         self.augmented_data = []
+
+        # Check if augmented data and rtmpc trajectories already exists in the save directory
+        augmented_data_path = os.path.join(self.save_dir, "augmented_data")
+        rtmpc_trajectories_path = os.path.join(self.save_dir, "rtmpc_trajectories")
+        if os.path.exists(augmented_data_path) and os.path.exists(rtmpc_trajectories_path) and not force_recompute:
+            for noise_level in self.noise_levels:
+                augmented_data_for_noise_level_path = os.path.join(augmented_data_path, f"noise_{noise_level:.2f}.pkl")
+                rtmpc_trajectories_for_noise_level_path = os.path.join(rtmpc_trajectories_path, f"noise_{noise_level:.2f}.pkl")
+                if os.path.exists(augmented_data_for_noise_level_path) and os.path.exists(rtmpc_trajectories_for_noise_level_path):
+                    augmented_data_for_noise_level = serialize.load(augmented_data_for_noise_level_path)
+                    rtmpc_trajectories_for_noise_level = serialize.load(rtmpc_trajectories_for_noise_level_path)
+                    self.augmented_data.append(augmented_data_for_noise_level)
+                    self.rtmpc_trajectories.append(rtmpc_trajectories_for_noise_level)
+            return self.augmented_data, self.rtmpc_trajectories
+
 
         for noise_idx, rollouts in enumerate(self.noisy_rollouts):
             noise_level = self.noise_levels[noise_idx]
@@ -435,7 +443,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             serialize.save(os.path.join(self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl"), augmented_data_for_noise_level)
             self.augmented_data.append(augmented_data_for_noise_level) 
         
-        return self.augmented_data 
+        return self.augmented_data, self.rtmpc_trajectories
 
     def _build_ranked_dataset(self) -> RankedTransitionsDataset:
         """Build ranked dataset from augmented data."""
