@@ -41,6 +41,18 @@ def save_policy(policy: policies.BasePolicy, policy_path: AnyPath) -> None:
     th.save(policy, parse_path(policy_path))
 
 
+def load_policy(policy_path: AnyPath) -> policies.BasePolicy:
+    """Load policy from a path saved with save_policy.
+
+    Args:
+        policy_path: path to load policy from.
+
+    Returns:
+        The loaded policy.
+    """
+    return th.load(parse_path(policy_path))
+
+
 def oric(x: np.ndarray) -> np.ndarray:
     """Optimal rounding under integer constraints.
 

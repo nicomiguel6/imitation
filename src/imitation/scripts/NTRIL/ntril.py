@@ -459,7 +459,6 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 num_snippets=saved["num_snippets"],
                 min_segment_length=saved["min_segment_length"],
                 max_segment_length=saved["max_segment_length"],
-                snippet_start_strategy=saved.get("snippet_start_strategy", "aligned"),
             )
             return self.ranked_dataset
 
@@ -479,7 +478,6 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             num_snippets=100,  # default; can be parameterized
             min_segment_length=20,
             max_segment_length=20,
-            snippet_start_strategy="aligned",
         )
 
         # Extract samples and save for reuse
@@ -490,7 +488,6 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 "num_snippets": self.ranked_dataset.num_snippets,
                 "min_segment_length": self.ranked_dataset.min_segment_length,
                 "max_segment_length": self.ranked_dataset.max_segment_length,
-                "snippet_start_strategy": self.ranked_dataset.snippet_start_strategy,
             },
             ranked_path,
         )
@@ -503,8 +500,18 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         # check if reward network already exists in the save directory
         reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth")
         if os.path.exists(reward_net_path):
-            self.reward_net = th.load(reward_net_path)
-            self.reward_net.to(self.device)
+            reward_net = TrajectoryRewardNet(
+                observation_space=self.venv.observation_space,
+                action_space=self.venv.action_space,
+                use_state=True,
+                use_action=False,
+                use_next_state=False,
+                use_done=False,
+                hid_sizes=(256, 256),
+            )
+            reward_net.load_state_dict(th.load(reward_net_path, map_location=self.device))
+            reward_net.to(self.device)
+            self.reward_net = reward_net
             return self.reward_net
 
         if self.ranked_dataset is None:
@@ -558,13 +565,13 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
         return self.reward_learner.reward_net
 
-    def _train_final_policy(self, total_timesteps: int, **kwargs) -> Dict[str, Any]:
+    def _train_final_policy(self, total_timesteps: int, force_retrain: bool = False, **kwargs) -> Dict[str, Any]:
         """Train final policy using RL with learned reward."""
 
         # Check if final policy already exists in the save directory
         final_policy_path = os.path.join(self.save_dir, "final_policy", "final_policy.zip")
-        if os.path.exists(final_policy_path):
-            self.final_policy = util.load_policy(final_policy_path)
+        if os.path.exists(final_policy_path) and not force_retrain:
+            self.final_policy = PPO.load(final_policy_path)
             return self.final_policy
         
         # Check if reward network already exists in the save directory
@@ -589,8 +596,12 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         )
 
         learned_reward_venv = RewardVecEnvWrapper(self.venv, relabel_reward_fn)
+        tb_log_dir = os.path.join(self.save_dir, "logs", "rl_step6")
         agent = PPO(
-            "MlpPolicy", learned_reward_venv, n_steps=2048 // learned_reward_venv.num_envs
+            "MlpPolicy",
+            learned_reward_venv,
+            n_steps=2048 // learned_reward_venv.num_envs,
+            tensorboard_log=tb_log_dir,
         )
         agent.learn(total_timesteps=total_timesteps, progress_bar=True)
         agent.save(os.path.join(self.save_dir, "final_policy", "final_policy.zip"))

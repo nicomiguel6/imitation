@@ -11,7 +11,7 @@ import pytope
 def main():
 
     model_type = 'continuous' # either 'discrete' or 'continuous'
-    t_step = 1.0
+    t_step = 0.1
     model = do_mpc.model.LinearModel(model_type)
 
     _x = model.set_variable(var_type='_x', var_name='x', shape=(2,1))
@@ -19,14 +19,16 @@ def main():
 
     A = np.array([[0,1],[0,0]])
     B = np.array([[0], [1]])
-    Q = np.diag([1,1])
+    # A = np.array([[1,1],[0,1]])
+    # B = np.array([[0.5], [1]])
+    Q = np.diag([10,1])
     R = 0.1
 
     x_next = A@_x + B@_u
 
     model.set_rhs('x', x_next)
 
-    model.set_expression(expr_name='cost', expr= _x.T @ Q @ _x)
+    # model.set_expression(expr_name='cost', expr= _x.T @ Q @ _x + _u.T @ R @ _u)
 
     # Build the model
     model.setup()
@@ -61,33 +63,33 @@ def main():
     H_mat = np.array([list(row) for row in H], dtype=float)
     W_b, W_A = H_mat[:,0], -H_mat[:,1:]
 
-    A_x, b_x = box_to_Ab(np.array([[-10.0], [-10.0]]), np.array([[10.0], [10.0]]))
-    A_u, b_u = box_to_Ab(np.array([-2.0]), np.array([2.0]))
+    A_x_t, b_x_t = box_to_Ab(np.array([[-10.0], [-10.0]]), np.array([[10.0], [10.0]]))
+    A_u_t, b_u_t = box_to_Ab(np.array([-2.0]), np.array([2.0]))
 
     # Compute mrpi set
     # test other method
     # W_acc, is_converged, vol_list = min_inv_set(A_d, B_d, Q, R, W_polytope)
     # A_F = W_acc.A
     # b_F = W_acc.b
-    A_F, b_F = compute_mrpi_hrep(Ak, W_polytope.A, W_polytope.b)
+    # A_F, b_F = compute_mrpi_hrep(Ak, W_polytope.A, W_polytope.b)
 
-    # Tighten
-    A_x_t, b_x_t = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
-    A_u_t, b_u_t = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
+    # # Tighten
+    # A_x_t, b_x_t = minkowski_difference_Hrep(A_x, b_x, A_F, b_F)
+    # A_u_t, b_u_t = tighten_by_linear_image_Hrep(A_u, b_u, K, A_F, b_F)
 
-    # compute robust MPI set
-    Xc_robust = pytope.Polytope(A = A_x_t, b = b_x_t)
-    Uc_robust = pytope.Polytope(A = A_u_t, b = b_u_t)
+    # # compute robust MPI set
+    # Xc_robust = pytope.Polytope(A = A_x_t, b = b_x_t)
+    # Uc_robust = pytope.Polytope(A = A_u_t, b = b_u_t)
 
-    print("State mRPI: ", Xc_robust.V)
-    print("Control mRPI: ", Uc_robust.V)
+    # print("State mRPI: ", Xc_robust.V)
+    # print("Control mRPI: ", Uc_robust.V)
 
 
     mpc = do_mpc.controller.MPC(model)
 
     setup_mpc = {
         'n_robust': 0,
-        'n_horizon': 10,
+        'n_horizon': 20,
         't_step': t_step,
         'state_discretization': 'collocation',
         'collocation_type': 'radau',
@@ -98,15 +100,16 @@ def main():
 
     mpc.set_param(**setup_mpc)
 
-    mterm = model.aux['cost'] # terminal cost
-    lterm = model.aux['cost'] # terminal cost
+    mterm = _x.T @ P @ _x # terminal cost
+    lterm = _x.T @ Q @ _x + _u.T @ R @ _u # stage cost
     # stage cost
 
     mpc.settings.set_linear_solver()
 
     mpc.set_objective(mterm=mterm, lterm=lterm)
+    mpc.settings.supress_ipopt_output()
 
-    mpc.set_rterm(u=R) # input penalty
+    # mpc.set_rterm(u=R) # input penalty
 
 
 
@@ -142,7 +145,7 @@ def main():
 
     # Initial state
     e = np.ones([model.n_x,1])
-    x0 = np.array([-7,-2]) # Values between +3 and +3 for all states
+    x0 = np.array([5,2]) # Values between +3 and +3 for all states
     mpc.x0 = x0
     simulator.x0 = x0
     estimator.x0 = x0
@@ -150,11 +153,12 @@ def main():
     # Use initial state to set the initial guess.
     mpc.set_initial_guess()
 
-    for k in range(50):
+    for k in range(200):
         u0 = mpc.make_step(x0)
         x_nom0 = mpc.data.prediction(('_x', 'x'))[:,0]
-        print("Predicted trajectory: ", mpc.data.prediction(('_x', 'x')))
-        u_applied = u0 + K @ (x0.T.reshape(-1,) - x_nom0.reshape(-1,))
+        # print("Predicted trajectory: ", mpc.data.prediction(('_x', 'x')))
+        # u_applied = u0 + K @ (x0.T.reshape(-1,) - x_nom0.reshape(-1,))
+        u_applied = u0
         y_next = simulator.make_step(u_applied)
         x0 = estimator.make_step(y_next)
 

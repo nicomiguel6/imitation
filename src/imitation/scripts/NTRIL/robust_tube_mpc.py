@@ -141,6 +141,8 @@ class RobustTubeMPC:
         disc_model = nominal_model.discretize(t_step=self.time_step)
         self.A_d = disc_model._A
         self.B_d = disc_model._B
+        # self.A_d = self.A
+        # self.B_d = self.B
 
         # Solve for P, K matrices
         self.P = solve_discrete_are(self.A_d, self.B_d, self.Q, self.R)
@@ -193,6 +195,23 @@ class RobustTubeMPC:
             "collocation_ni": 1,
             "store_full_solution": True,
         }
+        # setup_mpc = {
+        #     'n_horizon': self.horizon,
+        #     't_step': self.time_step,
+        #     'state_discretization': 'discrete',
+        #     'store_full_solution': True,
+        # }
+        mpc.set_param(**setup_mpc)
+
+
+        # mpc.set_param(**setup_mpc)
+
+        # Objective
+        x = nominal_model.x["x"]
+        u = nominal_model.u["u"]
+
+        lterm = (x-nominal_model.tvp["state_set_point"]).T @ self.Q @ (x-nominal_model.tvp["state_set_point"]) + (u-nominal_model.tvp["control_set_point"]).T @ self.R @ (u-nominal_model.tvp["control_set_point"])
+        mterm = (x-nominal_model.tvp["state_set_point"]).T @ self.P @ (x-nominal_model.tvp["state_set_point"]) # terminal cost
 
         if self.disturbance_bound is not None:
             # lower bounds of the states
@@ -219,19 +238,10 @@ class RobustTubeMPC:
             # upper bounds of the input
             mpc.bounds["upper", "_u", "u"] = np.array([self.b_u[1]])
 
-        mpc.set_param(**setup_mpc)
-
-        # Objective
-        x = nominal_model.x["x"]
-        u = nominal_model.u["u"]
-
-        lterm = (x-nominal_model.tvp["state_set_point"]).T @ self.Q @ (x-nominal_model.tvp["state_set_point"]) + (u-nominal_model.tvp["control_set_point"]).T @ self.R @ (u-nominal_model.tvp["control_set_point"])
-        mterm = (x-nominal_model.tvp["state_set_point"]).T @ self.P @ (x-nominal_model.tvp["state_set_point"])
-
         mpc.settings.set_linear_solver("ma57")
         mpc.settings.supress_ipopt_output()
         mpc.set_objective(mterm=mterm, lterm=lterm)
-        mpc.set_rterm(ca.SX(self.R))
+        #mpc.set_rterm(ca.SX(self.R))
 
         # ------------ TIME VARYING PARAMETERS (TVP) SETUP ------------- #
         # set up time varying parameters (tvp)
@@ -289,17 +299,21 @@ class RobustTubeMPC:
         else:
             self.simulator = do_mpc.simulator.Simulator(nominal_model)
 
+            sim_tvp_template = self.simulator.get_tvp_template()
+
+            def sim_tvp_fun(t_now):
+                t_idx = int(t_now / self.time_step)
+                n_obs = len(self.reference_trajectory.obs)
+                n_acts = len(self.reference_trajectory.acts)
+                obs_idx = min(t_idx, n_obs - 1)
+                act_idx = min(t_idx, n_acts - 1)
+                sim_tvp_template["state_set_point"] = self.reference_trajectory.obs[obs_idx].reshape(-1, 1)
+                sim_tvp_template["control_set_point"] = self.reference_trajectory.acts[act_idx].reshape(-1, 1)
+                return sim_tvp_template
+
+            self.simulator.set_tvp_fun(sim_tvp_fun)
+
         self.simulator.set_param(t_step=self.time_step)
-
-        # sim_tvp_template = self.simulator.get_tvp_template()
-
-        # def sim_tvp_fun(t_now):
-        #     sim_tvp_template['state_set_point'] = self.reference_trajectory.obs[t_now]
-        #     sim_tvp_template['control_set_point'] = self.reference_trajectory.acts[t_now]
-        #     return sim_tvp_template
-
-        # self.simulator.set_tvp_fun(sim_tvp_fun)
-
         self.simulator.setup()
 
         print(
@@ -374,7 +388,7 @@ class RobustTubeMPC:
         self,
         trajectory: types.Trajectory,
         partial_horizon: int = 20,
-        k_timesteps: int = 100,
+        k_timesteps: int = 5,
         n_augmentations: int = 5,
     ) -> Sequence[types.TrajectoryWithRew]:
         """Augment a trajectory using robust tube MPC. Sample points every k_timesteps and propagate partial trajectories following ancillary controller u = u0 + K(x-x0) .
@@ -709,7 +723,18 @@ def get_approximate_tube(Z_polyhedron: pytope.Polytope) -> pytope.Polytope:
         pytope.Polytope: Outer approximation polyhedron
     """
     # Extract vertices of polyhedron
-    verts = Z_polyhedron.V
+    try:
+        verts = Z_polyhedron.V
+    except RuntimeError as e:
+        # cdd numerical inconsistency — inspect Z_polyhedron here.
+        # Useful attributes:
+        #   Z_polyhedron.A, Z_polyhedron.b  — H-rep (Ax <= b)
+        #   np.linalg.cond(Z_polyhedron.A)  — condition number of A
+        print(f"[DEBUG] cdd RuntimeError: {e}")
+        print(f"[DEBUG] H-rep A:\n{Z_polyhedron.A}")
+        print(f"[DEBUG] H-rep b:\n{Z_polyhedron.b}")
+        breakpoint()
+        raise
 
     max_points = []
     min_points = []

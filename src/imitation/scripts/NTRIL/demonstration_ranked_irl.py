@@ -25,7 +25,6 @@ class RankedTransitionsDataset(Dataset):
         num_snippets: int = 10,
         min_segment_length: int = 50,
         max_segment_length: int = 100,
-        snippet_start_strategy: str = "aligned",
     ):
         """Initialize ranked transitions dataset.
 
@@ -41,12 +40,6 @@ class RankedTransitionsDataset(Dataset):
                 building from demonstrations.
             min_segment_length: Minimum length of segments extracted from a trajectory.
             max_segment_length: Maximum length of segments extracted from a trajectory.
-            snippet_start_strategy: Strategy for choosing snippet start indices.
-                Options:
-                - "aligned": both snippets start at the same time index (and have same length).
-                - "independent": each snippet start is sampled independently.
-                - "better_later": enforce better snippet starts later (better_start >= worse_start),
-                  where "better" is defined as lower noise epsilon.
         """
         if demonstrations is None and training_samples is None:
             raise ValueError("Either demonstrations or training samples must be provided")
@@ -54,13 +47,6 @@ class RankedTransitionsDataset(Dataset):
         self.num_snippets = num_snippets
         self.min_segment_length = min_segment_length
         self.max_segment_length = max_segment_length
-        self.snippet_start_strategy = snippet_start_strategy
-        allowed_strategies = {"aligned", "independent", "better_later"}
-        if self.snippet_start_strategy not in allowed_strategies:
-            raise ValueError(
-                f"Invalid snippet_start_strategy={self.snippet_start_strategy!r}. "
-                f"Must be one of {sorted(allowed_strategies)}."
-            )
         self.demo_dict = {}
         self.demonstrations = []
         self.training_data = {"traj": [], "label": []}
@@ -102,82 +88,49 @@ class RankedTransitionsDataset(Dataset):
                 self.demo_dict[noise_epsilon].append(demonstration)
 
     def _generate_training_samples(self):
-        """Generate training samples."""
-        step = 2
+        """Generate training samples.
 
-        # extract all noise levels
+        Preference pairs are labeled purely by noise level: lower noise epsilon
+        is assumed to be better. Start indices are sampled independently per
+        trajectory, so no temporal ordering is imposed across noise bins.
+        """
+        step = 2
         noise_levels = list(self.demo_dict.keys())
 
-        # Build all snippets of trajectories
-        for itx in range(self.num_snippets):
-            # Pick two noise levels at random (make sure they are different)
-            ni = 0
-            nj = 0
+        for _ in range(self.num_snippets):
+            # Pick two distinct noise levels at random.
+            ni, nj = 0, 0
             while ni == nj:
                 ni = np.random.randint(len(noise_levels))
                 nj = np.random.randint(len(noise_levels))
 
-            # pick random trajectory from each bin
+            # Pick a random trajectory from each noise bin.
             ti = random.choice(self.demo_dict[noise_levels[ni]])
             tj = random.choice(self.demo_dict[noise_levels[nj]])
 
-            # Create random snippet from each trajectory
-            min_length = min(len(ti.obs), len(tj.obs))
+            # Sample a shared segment length, capped to whichever trajectory is shorter.
             if self.min_segment_length == self.max_segment_length:
                 rand_length = self.min_segment_length
             else:
                 rand_length = np.random.randint(
                     self.min_segment_length, self.max_segment_length
                 )
-            # Ensure rand_length doesn't exceed either trajectory length
-            rand_length = min(rand_length, min_length)
+            rand_length = min(rand_length, len(ti.obs), len(tj.obs))
             if rand_length < 1:
                 raise ValueError(
-                    f"Sampled segment length {rand_length} is invalid for "
-                    f"trajectories with lengths {len(ti.obs)} and {len(tj.obs)}."
+                    f"Segment length {rand_length} is invalid for trajectories "
+                    f"of lengths {len(ti.obs)} and {len(tj.obs)}."
                 )
 
-            # Lower noise is assumed to be better (higher-ranked).
-            ti_better = noise_levels[ni] < noise_levels[nj]
-
-            if self.snippet_start_strategy == "aligned":
-                # Simplest: both snippets start at the same time index.
-                start = np.random.randint(min_length - rand_length + 1)
-                ti_start = start
-                tj_start = start
-            elif self.snippet_start_strategy == "independent":
-                # Starts are sampled independently.
-                ti_start = np.random.randint(len(ti.obs) - rand_length + 1)
-                tj_start = np.random.randint(len(tj.obs) - rand_length + 1)
-            elif self.snippet_start_strategy == "better_later":
-                # Enforce "better starts later" (or equal):
-                # better_start >= worse_start.
-                worse_start = np.random.randint(min_length - rand_length + 1)
-                if ti_better:
-                    tj_start = worse_start
-                    ti_start = np.random.randint(
-                        worse_start, len(ti.obs) - rand_length + 1
-                    )
-                else:
-                    ti_start = worse_start
-                    tj_start = np.random.randint(
-                        worse_start, len(tj.obs) - rand_length + 1
-                    )
-            else:
-                # Should be impossible due to validation in __init__.
-                raise RuntimeError(
-                    f"Unhandled snippet_start_strategy={self.snippet_start_strategy!r}"
-                )
+            # Sample start indices independently — no temporal ordering imposed.
+            ti_start = np.random.randint(len(ti.obs) - rand_length + 1)
+            tj_start = np.random.randint(len(tj.obs) - rand_length + 1)
 
             snip_i = ti.obs[ti_start : ti_start + rand_length : step]
             snip_j = tj.obs[tj_start : tj_start + rand_length : step]
 
-            if noise_levels[ni] < noise_levels[nj]:
-                # bin i has less noise, so better
-                label = 1
-            else:
-                # bin j has less noise
-                label = 0
+            # Label purely by noise level: lower epsilon = better = preferred (1).
+            label = 1 if noise_levels[ni] < noise_levels[nj] else 0
 
             self.training_data["traj"].append((snip_i, snip_j))
             self.training_data["label"].append(label)

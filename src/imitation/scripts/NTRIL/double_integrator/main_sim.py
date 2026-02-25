@@ -445,7 +445,7 @@ def run_ntril_training(
     noise_levels: tuple = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5),
     n_rollouts_per_noise: int = 10,
     bc_epochs: int = 50,
-    rl_total_timesteps: int = 100000,
+    rl_total_timesteps: int = 10000000,
     run_individual_steps: Optional[list] = None,
     just_plot_noisy_rollouts: bool = False,
     noisy_rollouts: Optional[Sequence[Trajectory]] = None,
@@ -627,7 +627,7 @@ def run_ntril_training(
                 ntril_trainer.noisy_rollouts = noisy_rollouts
                 print("Step 3: Augmenting data with robust tube MPC...")
 
-                augmentation_data, rtmpc_trajectories = ntril_trainer._augment_data_with_mpc(force_recompute=True)
+                augmentation_data, rtmpc_trajectories = ntril_trainer._augment_data_with_mpc(force_recompute=False)
                 step_results["augmentation"] = augmentation_data
                 step_results["rtmpc_trajectories"] = rtmpc_trajectories
                 print("\nData augmentation complete")
@@ -651,7 +651,7 @@ def run_ntril_training(
             elif step_num == 6: # Trains final policy using learned reward
                 print("Step 6: Training final policy using learned reward...")
                 rl_stats = ntril_trainer._train_final_policy(
-                    total_timesteps=rl_total_timesteps, **(rl_train_kwargs or {})
+                    total_timesteps=rl_total_timesteps, force_retrain=False, **(rl_train_kwargs or {})
                 )
                 step_results["rl"] = rl_stats
                 print("\nFinal policy training complete")
@@ -832,32 +832,47 @@ def main():
         save_dir=str(SAVE_DIR),
         noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
         n_rollouts_per_noise=10,
-        rl_total_timesteps=100_000,
-        run_individual_steps=[1,2,3],
+        rl_total_timesteps=1_000_000,
+        run_individual_steps=[1,2,3,4,5,6],
         just_plot_noisy_rollouts=False,
         robust_mpc=robust_tube_mpc,
     )
 
-    # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
-    mpc_plot_dir = SCRIPT_DIR / "debug" / "plots" / "mpc"
-    mpc_plot_dir.mkdir(parents=True, exist_ok=True)
-    for idx, noise_level in enumerate(ntril_trainer.noise_levels):
-        nominal_noisy_rollout = ntril_trainer.noisy_rollouts[idx][0]
-        rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]
+    # # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
+    # mpc_plot_dir = SCRIPT_DIR / "debug" / "plots" / "mpc"
+    # mpc_plot_dir.mkdir(parents=True, exist_ok=True)
+    # for idx, noise_level in enumerate(ntril_trainer.noise_levels):
+    #     nominal_noisy_rollout = ntril_trainer.noisy_rollouts[idx][0]
+    #     rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]
         
-        fig, ax = plt.subplots()
-        ax.plot(nominal_noisy_rollout.obs[:, 0], label="Nominal Noisy Rollout")
-        ax.plot(rtmpc_trajectory.obs[:, 0], label="RTMPC Trajectory")
-        # sdet adjusted state bounds
-        ax.axhline(y=-robust_tube_mpc.b_x_t[1], color="r", linestyle="--", linewidth=1)
-        ax.axhline(y=robust_tube_mpc.b_x_t[3], color="r", linestyle="--", linewidth=1)
-        ax.legend()
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Position")
-        ax.set_title(f"Nominal Noisy Rollout vs RTMPC Trajectory at Noise Level {noise_level:.2f}")
-        plt.savefig(mpc_plot_dir / f"nominal_comparison_{noise_level:.2f}.png")
-        plt.close()
-        print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
+    #     fig, ax = plt.subplots()
+    #     ax.plot(nominal_noisy_rollout.obs[:, 0], label="Nominal Noisy Rollout")
+    #     ax.plot(rtmpc_trajectory.obs[:, 0], label="RTMPC Trajectory")
+    #     # sdet adjusted state bounds
+    #     ax.axhline(y=-robust_tube_mpc.b_x_t[1], color="r", linestyle="--", linewidth=1)
+    #     ax.axhline(y=robust_tube_mpc.b_x_t[3], color="r", linestyle="--", linewidth=1)
+    #     ax.legend()
+    #     ax.set_xlabel("Time")
+    #     ax.set_ylabel("Position")
+    #     ax.set_title(f"Nominal Noisy Rollout vs RTMPC Trajectory at Noise Level {noise_level:.2f}")
+    #     plt.savefig(mpc_plot_dir / f"nominal_comparison_{noise_level:.2f}.png")
+    #     plt.close()
+    #     print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
+
+    # Plot RTMPC trajectory and augmented data for a noise level
+    noise_level = 0.0
+    rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[0][0] # one trajectory at noise level 0.0
+    augmented_data = ntril_trainer.augmented_data[0][:5] # first 10 augmented trajectories at noise level 0.0  
+    fig, ax = plt.subplots()
+    ax.plot(rtmpc_trajectory.obs[:, 0], color="blue", label="RTMPC Trajectory")
+    for i, traj in enumerate(augmented_data):
+        label = "Augmented Data" if i == 0 else None
+        ax.plot(traj.obs[:, 0], color="red", label=label)
+    ax.legend()
+    # make directory if it doesn't exist
+    augmented_plots_dir = SCRIPT_DIR / "debug" / "plots" / "augmented_plots"
+    augmented_plots_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(augmented_plots_dir / f"rtmpc_trajectory_{noise_level}.png")
 
 
     # # Step 3: Evaluate the trained policy

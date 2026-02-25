@@ -131,8 +131,8 @@ class DoubleIntegratorEnv(gym.Env):
         # Sample initial state uniformly from bounds
         if state is None:
             self.state = self.np_random.uniform(
-                low=[-self.max_position, -self.max_velocity],
-                high=[self.max_position, self.max_velocity],
+                low=[-5.0, -5.0],
+                high=[5.0, 5.0],
             ).astype(np.float32)
         else:
             self.state = state.astype(np.float32)
@@ -181,7 +181,7 @@ class DoubleIntegratorEnv(gym.Env):
 
         # Important: write clipped values back to internal state.
         # Otherwise self.state can silently diverge even though the returned values look bounded.
-        self.state = np.array([position, velocity], dtype=np.float32)
+        # self.state = np.array([position, velocity], dtype=np.float32)
         # self.state = self.state.astype(np.float32)
         self.step_count += 1
 
@@ -254,6 +254,7 @@ class DoubleIntegratorEnv(gym.Env):
 
         K = np.array([[K_position, K_velocity]], dtype=np.float32)
         acceleration = -K @ np.array([[position - position_ref], [velocity - velocity_ref]])
+        acceleration = np.clip(acceleration, -2.0, 2.0)
 
         return acceleration.astype(np.float32)
 
