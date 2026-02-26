@@ -84,7 +84,7 @@ if __name__ == "__main__":
 
     # policy = PPO.load(str(CHECKPOINTS_DIR / "expert_policy_final_2000000.zip"), env=env_policy, device=device)
     # policy = bc.reconstruct_policy(str(BC_POLICY_PATH), device=device)
-    policy = PPO.load(str(FINAL_POLICY_PATH), env=env_policy, device=device)
+    # policy = PPO.load(str(FINAL_POLICY_PATH), env=env_policy, device=device)
 
     # Test MPC on double integrator gym Env
 
@@ -96,7 +96,7 @@ if __name__ == "__main__":
         B=np.array([[0.0], [1.0]]),
         # A=np.array([[1,1],[0,1]]),
         # B=np.array([[0.5], [1]]),
-        Q=np.diag([1.0, 10.0]),
+        Q=np.diag([1.0, 1.0]),
         R=0.1*np.eye(1),
         state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
         control_bounds=(np.array([-2.0]), np.array([2.0])))
@@ -114,8 +114,8 @@ if __name__ == "__main__":
         rewards_policy = []
         rewards_mpc = []
         for i in range(env_policy.unwrapped.max_episode_steps):
-            # action_policy = env_policy.unwrapped.suboptimal_expert(obs) # trained final policy
-            action_policy, _ = policy.predict(obs)
+            action_policy = env_policy.unwrapped.suboptimal_expert(obs)
+            # action_policy, _ = policy.predict(obs) # trained final policy
             _, action_mpc = mpc_policy.solve_mpc(obs_mpc) # normal MPC policy
             obs, reward, terminated, truncated, info = env_policy.step(action_policy)
             obs_mpc, reward_mpc, terminated_mpc, truncated_mpc, info_mpc = env_mpc.step(action_mpc)
@@ -130,16 +130,16 @@ if __name__ == "__main__":
 
         # Plot both phase portraits in same figure
         fig, ax = plt.subplots()
-        ax.plot(np.array(states_policy)[:, 0], "k-", label="Final Policy Trajectory")
+        ax.plot(np.array(states_policy)[:, 0], "k-", label="Suboptimal Expert Trajectory")
         ax.plot(np.array(states_mpc)[:, 0], "r-", label="MPC Trajectory")
         ax.set_xlabel("Time")
         ax.set_ylabel("Position")
-        ax.set_title("Trajectory Comparison of Final Policy and MPC")
+        ax.set_title("Trajectory Comparison of Suboptimal Expert and MPC")
         ax.legend()
         fig.savefig(SCRIPT_DIR / f"trajectory_comparison_{j}.png")
         plt.close()
 
         # Print total policy cost
-        print("Total policy cost: ", sum(rewards_policy))
+        print("Total suboptimal expert cost: ", sum(rewards_policy))
         print("Total MPC cost: ", sum(rewards_mpc))
     
