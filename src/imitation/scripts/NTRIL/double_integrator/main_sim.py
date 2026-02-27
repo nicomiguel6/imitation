@@ -775,11 +775,6 @@ def main():
     #     force_retrain=False,
     # )
 
-    # Step 1: Set up suboptimal PID as initial policy
-    suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
-        observation_space=ghost_env.observation_space,
-        action_space=ghost_env.action_space,
-    )
 
 
     '''The use of BC for the MPC demonstrations is not necessary, but it is a good way to get a policy that is close to the MPC policy. 
@@ -824,6 +819,13 @@ def main():
 
     robust_tube_mpc.setup()
 
+    # Step 1: Set up suboptimal PID as initial policy
+    suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
+        observation_space=ghost_env.observation_space,
+        action_space=ghost_env.action_space,
+    )
+
+    # suboptimal_policy.set_K_values(robust_tube_mpc.K[0,0], robust_tube_mpc.K[0,1])
 
     # Step 2: Run NTRIL training (Choose step 3 to test sample augmentation)
     ntril_trainer = run_ntril_training(
@@ -833,7 +835,7 @@ def main():
         noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
         n_rollouts_per_noise=10,
         rl_total_timesteps=1_000_000,
-        run_individual_steps=[1,2,3,4,5,6],
+        run_individual_steps=[1,2],
         just_plot_noisy_rollouts=False,
         robust_mpc=robust_tube_mpc,
     )
@@ -859,20 +861,20 @@ def main():
     #     plt.close()
     #     print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
 
-    # Plot RTMPC trajectory and augmented data for a noise level
-    noise_level = 0.0
-    rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[0][0] # one trajectory at noise level 0.0
-    augmented_data = ntril_trainer.augmented_data[0][:5] # first 10 augmented trajectories at noise level 0.0  
-    fig, ax = plt.subplots()
-    ax.plot(rtmpc_trajectory.obs[:, 0], color="blue", label="RTMPC Trajectory")
-    for i, traj in enumerate(augmented_data):
-        label = "Augmented Data" if i == 0 else None
-        ax.plot(traj.obs[:, 0], color="red", label=label)
-    ax.legend()
-    # make directory if it doesn't exist
-    augmented_plots_dir = SCRIPT_DIR / "debug" / "plots" / "augmented_plots"
-    augmented_plots_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(augmented_plots_dir / f"rtmpc_trajectory_{noise_level}.png")
+    # # Plot RTMPC trajectory and augmented data for a noise level
+    # noise_level = 0.0
+    # rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[0][0] # one trajectory at noise level 0.0
+    # augmented_data = ntril_trainer.augmented_data[0][:5] # first 10 augmented trajectories at noise level 0.0  
+    # fig, ax = plt.subplots()
+    # ax.plot(rtmpc_trajectory.obs[:, 0], color="blue", label="RTMPC Trajectory")
+    # for i, traj in enumerate(augmented_data):
+    #     label = "Augmented Data" if i == 0 else None
+    #     ax.plot(traj.obs[:, 0], color="red", label=label)
+    # ax.legend()
+    # # make directory if it doesn't exist
+    # augmented_plots_dir = SCRIPT_DIR / "debug" / "plots" / "augmented_plots"
+    # augmented_plots_dir.mkdir(parents=True, exist_ok=True)
+    # plt.savefig(augmented_plots_dir / f"rtmpc_trajectory_{noise_level}.png")
 
 
     # # Step 3: Evaluate the trained policy

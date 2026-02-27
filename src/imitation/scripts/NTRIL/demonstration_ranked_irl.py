@@ -129,8 +129,9 @@ class RankedTransitionsDataset(Dataset):
             snip_i = ti.obs[ti_start : ti_start + rand_length : step]
             snip_j = tj.obs[tj_start : tj_start + rand_length : step]
 
-            # Label purely by noise level: lower epsilon = better = preferred (1).
-            label = 1 if noise_levels[ni] < noise_levels[nj] else 0
+            # label=0 → J(τ_i) should win (i is better); label=1 → J(τ_j) should win.
+            # Lower noise = better trajectory, so assign label=0 when i has lower noise.
+            label = 0 if noise_levels[ni] < noise_levels[nj] else 1
 
             self.training_data["traj"].append((snip_i, snip_j))
             self.training_data["label"].append(label)

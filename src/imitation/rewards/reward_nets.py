@@ -439,6 +439,16 @@ class BasicRewardNet(RewardNet):
         self.mlp = networks.build_mlp(**full_build_mlp_kwargs)
 
     def forward(self, state, action=None, next_state=None, done=None):
+        unbatched = state.dim() == 1
+        if unbatched:
+            state = state.unsqueeze(0)
+            if action is not None:
+                action = action.unsqueeze(0)
+            if next_state is not None:
+                next_state = next_state.unsqueeze(0)
+            if done is not None:
+                done = done.unsqueeze(0)
+
         inputs = []
         if self.use_state:
             inputs.append(th.flatten(state, 1))
@@ -454,10 +464,18 @@ class BasicRewardNet(RewardNet):
         outputs = self.mlp(inputs_concat)
         assert outputs.shape == state.shape[:1]
 
+        if unbatched:
+            outputs = outputs.squeeze(0)
         return outputs
 
 
 class TrajectoryRewardNet(BasicRewardNet):
+    """State-only reward network for trajectory preference learning (D-REX).
+
+    Maps each state to a scalar reward R_θ(s).  Trajectory-level return is
+    the sum of per-state rewards: J(τ) = Σ_t R_θ(s_t).  Preference pairs
+    are scored via cross-entropy over [J(τ_i), J(τ_j)].
+    """
 
     def __init__(
         self,
@@ -470,7 +488,6 @@ class TrajectoryRewardNet(BasicRewardNet):
         hid_sizes: Sequence[int] = (256, 256),
         **kwargs,
     ):
-
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
@@ -482,36 +499,39 @@ class TrajectoryRewardNet(BasicRewardNet):
             **kwargs,
         )
 
-    def _cumulative_reward(self, traj: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
-        """Compute cumulative rewards for a trajectory of states
+    def cumulative_reward(self, traj: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+        """Compute cumulative reward for a trajectory snippet.
 
         Args:
-            traj (th.Tensor): Trajectory of states with shape (1 x n_segment x 2)
+            traj: State trajectory with shape (n_timesteps, state_dim).
 
         Returns:
-            sum_rewards (th.Tensor): Cumulative sum of rewards across trajectory
-            sum_abs_rewards (th.Tensor): Cumulative absolute sum of rewards across trajectory
+            sum_rewards: Scalar sum of per-state rewards, Σ R_θ(s_t).
+            sum_abs_rewards: Scalar sum of absolute per-state rewards,
+                Σ |R_θ(s_t)|, used for L1 regularisation.
         """
-        sum_rewards = 0
-        sum_abs_rewards = 0
+        per_state_rewards = BasicRewardNet.forward(self, traj)
+        return th.sum(per_state_rewards), th.sum(th.abs(per_state_rewards))
 
-        # Input: trajectory of states with shape (1 x n_segment x 2)
-        # x = traj.flatten(start_dim=0, end_dim=1)
-        x = BasicRewardNet.forward(self, traj)
+    def compare(
+        self, traj_i: th.Tensor, traj_j: th.Tensor,
+    ) -> Tuple[th.Tensor, th.Tensor]:
+        """Compare two trajectory snippets by cumulative reward.
 
-        sum_rewards += th.sum(x)
-        sum_abs_rewards += th.sum(th.abs(x))
+        Args:
+            traj_i: First snippet, shape (n_i, state_dim).
+            traj_j: Second snippet, shape (n_j, state_dim).
 
-        return sum_rewards, sum_abs_rewards
-
-    def compare(self, traj_i: th.Tensor, traj_j: th.Tensor) -> Tuple[th.Tensor, float]:
-
-        cum_r_i, abs_r_i = self._cumulative_reward(traj_i)
-        cum_r_j, abs_r_j = self._cumulative_reward(traj_j)
-        return (
-            th.cat((cum_r_i.unsqueeze(0), cum_r_j.unsqueeze(0)), 0),
-            abs_r_i + abs_r_j,
-        )
+        Returns:
+            logits: Tensor of shape (2,) containing [J(τ_i), J(τ_j)],
+                suitable for cross-entropy against a preference label where
+                label=0 means τ_i is preferred and label=1 means τ_j is preferred.
+            abs_reward_sum: Combined absolute-reward regularisation term.
+        """
+        cum_r_i, abs_r_i = self.cumulative_reward(traj_i)
+        cum_r_j, abs_r_j = self.cumulative_reward(traj_j)
+        logits = th.stack([cum_r_i, cum_r_j])
+        return logits, abs_r_i + abs_r_j
 
 
 class CnnRewardNet(RewardNet):

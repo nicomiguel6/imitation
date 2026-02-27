@@ -146,11 +146,11 @@ class RobustTubeMPC:
 
         # Solve for P, K matrices
         self.P = solve_discrete_are(self.A_d, self.B_d, self.Q, self.R)
+        self.K = -np.linalg.inv(self.B_d.T @ self.P @ self.B_d + self.R) @ (
+            self.B_d.T @ self.P @ self.A_d
+        )
 
         if self.disturbance_bound is not None:
-            self.K = -np.linalg.inv(self.B_d.T @ self.P @ self.B_d + self.R) @ (
-                self.B_d.T @ self.P @ self.A_d
-            )
 
             # Closed loop
             self.Ak = self.A_d + self.B_d @ self.K

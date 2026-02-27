@@ -498,7 +498,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         """Train reward network using demonstration ranked IRL."""
 
         # check if reward network already exists in the save directory
-        reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth")
+        reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth") 
         if os.path.exists(reward_net_path):
             reward_net = TrajectoryRewardNet(
                 observation_space=self.venv.observation_space,

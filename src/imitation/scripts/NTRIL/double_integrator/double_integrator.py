@@ -181,7 +181,7 @@ class DoubleIntegratorEnv(gym.Env):
 
         # Important: write clipped values back to internal state.
         # Otherwise self.state can silently diverge even though the returned values look bounded.
-        # self.state = np.array([position, velocity], dtype=np.float32)
+        self.state = np.array([position, velocity], dtype=np.float32)
         # self.state = self.state.astype(np.float32)
         self.step_count += 1
 
@@ -263,6 +263,12 @@ class DoubleIntegratorSuboptimalPolicy(NonTrainablePolicy):
     def __init__(self, observation_space: gym.Space, action_space: gym.Space):
         super().__init__(observation_space, action_space)
         self.env = DoubleIntegratorEnv()
+        self.K_position = 1.2176
+        self.K_velocity = 1.6073
 
     def _choose_action(self, obs: np.ndarray) -> np.ndarray:
-        return self.env.suboptimal_expert(obs)
+        return self.env.suboptimal_expert(obs, self.K_position, self.K_velocity)
+
+    def set_K_values(self, K_position: float, K_velocity: float):
+        self.K_position = K_position
+        self.K_velocity = K_velocity
