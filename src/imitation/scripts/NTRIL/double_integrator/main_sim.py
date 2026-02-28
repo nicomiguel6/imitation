@@ -447,6 +447,7 @@ def run_ntril_training(
     bc_epochs: int = 50,
     rl_total_timesteps: int = 10000000,
     run_individual_steps: Optional[list] = None,
+    retrain: Optional[list] = None,
     just_plot_noisy_rollouts: bool = False,
     noisy_rollouts: Optional[Sequence[Trajectory]] = None,
     robust_mpc: Optional[RobustTubeMPC] = None,
@@ -470,10 +471,13 @@ def run_ntril_training(
         bc_epochs: Number of epochs for BC training (ignored when
             ``bc_policy`` is provided).
         rl_total_timesteps: Total timesteps for final RL training.
-        run_individual_steps: List of specific pipeline steps to run.
+        run_individual_steps: List of specific pipeline steps to run (1–6).
+        retrain: Step names to force-retrain even when cached artefacts exist.
+            Accepts ``None`` (use cache), ``"all"``, or a list of names from
+            ``("bc", "rollouts", "mpc", "ranking", "irl", "rl")``.
+            When ``run_individual_steps`` is used, only the names that map to
+            the requested step numbers are applied.
         just_plot_noisy_rollouts: Debug flag to visualise noisy rollouts only.
-        bc_policy: Pre-trained suboptimal :class:`bc.BC` instance (mutually
-            exclusive with ``demonstrations``).
         noisy_rollouts: Pre-generated noisy rollouts (optional).
         robust_mpc: Robust MPC instance required for Step 3.
 
@@ -560,6 +564,17 @@ def run_ntril_training(
 
         return
 
+    # Map step numbers to the retrain step names used by NTRILTrainer.
+    _STEP_NUM_TO_NAME = {1: "bc", 2: "rollouts", 3: "mpc", 4: "ranking", 5: "irl", 6: "rl"}
+
+    # Resolve force flags for individual steps.
+    if retrain == "all":
+        _force_set = set(_STEP_NUM_TO_NAME.values())
+    elif retrain is None:
+        _force_set = set()
+    else:
+        _force_set = set(retrain)
+
     if run_individual_steps is None:
         print("\nStarting NTRIL training pipeline...")
         training_stats = ntril_trainer.train(
@@ -567,6 +582,7 @@ def run_ntril_training(
             bc_train_kwargs={"n_epochs": bc_epochs, "progress_bar": True},
             irl_train_kwargs=irl_train_kwargs,
             rl_train_kwargs=rl_train_kwargs,
+            retrain=retrain,
         )
 
         print("\n" + "=" * 70)
@@ -595,7 +611,8 @@ def run_ntril_training(
                 else:
                     print("Step 1: Training BC policy from demonstrations...")
                     bc_stats = ntril_trainer._train_bc_policy(
-                        n_epochs=bc_epochs, progress_bar=True
+                        force_retrain="bc" in _force_set,
+                        n_epochs=bc_epochs, progress_bar=True,
                     )
                     step_results["bc"] = bc_stats
                     print("\nBC Training Stats:")
@@ -603,21 +620,20 @@ def run_ntril_training(
                         print(f"  {key}: {value}")
 
             elif step_num == 2: # Generates noisy rollouts from BC policy
-                # Check if bc policy is provided
                 if suboptimal_policy is None:
                     raise ValueError("Suboptimal policy is required for step 2")
                 print("Step 2: Generating noisy rollouts...")
-                _, rollout_stats = ntril_trainer._generate_noisy_rollouts()
+                _, rollout_stats = ntril_trainer._generate_noisy_rollouts(
+                    force_retrain="rollouts" in _force_set
+                )
                 step_results["rollouts"] = rollout_stats
                 print(
                     f"\nGenerated rollouts for {len(ntril_trainer.noise_levels)} noise levels"
                 )
 
             elif step_num == 3: # Applies robust tube MPC to augment data
-                # Check if robust MPC is provided
                 if robust_mpc is None:
                     raise ValueError("Robust MPC is required for step 3")
-                # check if noisy rollouts are available at save location
                 noisy_rollouts_path = os.path.join(save_dir, "noisy_rollouts.pkl")
                 if os.path.exists(noisy_rollouts_path):
                     with open(noisy_rollouts_path, "rb") as f:
@@ -626,24 +642,26 @@ def run_ntril_training(
                     raise ValueError(f"Noisy rollouts not found at {noisy_rollouts_path}")
                 ntril_trainer.noisy_rollouts = noisy_rollouts
                 print("Step 3: Augmenting data with robust tube MPC...")
-
-                augmentation_data, rtmpc_trajectories = ntril_trainer._augment_data_with_mpc(force_recompute=False)
+                augmentation_data, rtmpc_trajectories = ntril_trainer._augment_data_with_mpc(
+                    force_retrain="mpc" in _force_set
+                )
                 step_results["augmentation"] = augmentation_data
                 step_results["rtmpc_trajectories"] = rtmpc_trajectories
                 print("\nData augmentation complete")
 
             elif step_num == 4: # Builds ranked dataset
                 print("Step 4: Building ranked dataset...")
-                ranking_stats = ntril_trainer._build_ranked_dataset()
+                ranking_stats = ntril_trainer._build_ranked_dataset(
+                    force_retrain="ranking" in _force_set
+                )
                 step_results["ranking"] = ranking_stats
                 print("\nRanked dataset built")
 
             elif step_num == 5: # Trains reward network using demonstration ranked IRL
-                print(
-                    "Step 5: Training reward network with demonstration ranked IRL..."
-                )
+                print("Step 5: Training reward network with demonstration ranked IRL...")
                 irl_stats = ntril_trainer._train_reward_network(
-                    **(irl_train_kwargs or {})
+                    force_retrain="irl" in _force_set,
+                    **(irl_train_kwargs or {}),
                 )
                 step_results["irl"] = irl_stats
                 print("\nIRL training complete")
@@ -651,7 +669,9 @@ def run_ntril_training(
             elif step_num == 6: # Trains final policy using learned reward
                 print("Step 6: Training final policy using learned reward...")
                 rl_stats = ntril_trainer._train_final_policy(
-                    total_timesteps=rl_total_timesteps, force_retrain=False, **(rl_train_kwargs or {})
+                    total_timesteps=rl_total_timesteps,
+                    force_retrain="rl" in _force_set,
+                    **(rl_train_kwargs or {}),
                 )
                 step_results["rl"] = rl_stats
                 print("\nFinal policy training complete")
@@ -671,16 +691,27 @@ def plot_noisy_rollouts(noise_level, noisy_rollouts, max_rollouts_per_level: int
     """Plot a few rollouts for each noise level, on separate figures."""
     print("Plotting noisy rollouts...")
     fig, ax = plt.subplots()
+    # for traj in noisy_rollouts[:max_rollouts_per_level]:
+    #     ax.plot(traj.obs[:, 0], traj.obs[:, 1], label=f"Noise {noise_level}")
+    #     ax.plot(traj.obs[0, 0], traj.obs[0, 1], "b+", label="Initial State")
+    #     ax.plot(traj.obs[-1, 0], traj.obs[-1, 1], "g+", label="Final State")
+    #     ax.grid(True)
+    #     ax.set_xlabel("Position")
+    #     ax.set_ylabel("Velocity")
+    #     ax.set_title(f"Phase Portrait of Noisy Rollouts at Noise Level {noise_level:.2f}")
+    #     ax.legend()
+    # plot as timeseries of position vs time
     for traj in noisy_rollouts[:max_rollouts_per_level]:
-        ax.plot(traj.obs[:, 0], traj.obs[:, 1], label=f"Noise {noise_level}")
-        ax.plot(traj.obs[0, 0], traj.obs[0, 1], "b+", label="Initial State")
-        ax.plot(traj.obs[-1, 0], traj.obs[-1, 1], "g+", label="Final State")
+        ax.plot(traj.obs[:, 0], label=f"Noise {noise_level}")
         ax.grid(True)
-        ax.set_xlabel("Position")
-        ax.set_ylabel("Velocity")
-    ax.legend()
-    ax.set_title(f"Phase Portrait of Noisy Rollouts at Noise Level {noise_level:.2f}")
-    plt.savefig(f"debug/plots/noisy_rollouts_{noise_level}.png")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Position")
+        ax.set_title(f"Timeseries of Position for Noisy Rollouts at Noise Level {noise_level:.2f}")
+        ax.legend()
+
+    save_dir = "debug/plots/noisy_rollouts"
+    os.makedirs(save_dir, exist_ok=True)
+    plt.savefig(os.path.join(save_dir, f"noisy_rollouts_{noise_level}.png"))
     plt.close()
 
     print("Noisy rollouts plotted successfully")
@@ -826,6 +857,8 @@ def main():
     )
 
     # suboptimal_policy.set_K_values(robust_tube_mpc.K[0,0], robust_tube_mpc.K[0,1])
+    K = [0.02, 0.3]
+    suboptimal_policy.set_K_values(K[0], K[1])
 
     # Step 2: Run NTRIL training (Choose step 3 to test sample augmentation)
     ntril_trainer = run_ntril_training(
@@ -836,7 +869,8 @@ def main():
         n_rollouts_per_noise=10,
         rl_total_timesteps=1_000_000,
         run_individual_steps=[1,2],
-        just_plot_noisy_rollouts=False,
+        retrain=["bc", "rollouts"],
+        just_plot_noisy_rollouts=True,
         robust_mpc=robust_tube_mpc,
     )
 

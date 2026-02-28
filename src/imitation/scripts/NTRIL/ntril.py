@@ -195,65 +195,97 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         object.__setattr__(self, 'learned_reward_net', None)
         object.__setattr__(self, 'final_policy', None)
 
+    #: Names of all pipeline steps, in execution order.
+    STEPS: tuple = ("bc", "rollouts", "mpc", "ranking", "irl", "rl")
+
     def train(
         self,
         total_timesteps: int,
         bc_train_kwargs: Optional[Mapping[str, Any]] = None,
         irl_train_kwargs: Optional[Mapping[str, Any]] = None,
         rl_train_kwargs: Optional[Mapping[str, Any]] = None,
+        retrain: Union[str, Sequence[str], None] = None,
     ) -> Dict[str, Any]:
         """Run the complete NTRIL training pipeline.
 
         Args:
-            total_timesteps: Total timesteps for final RL training
-            bc_train_kwargs: Additional kwargs for BC training
-            irl_train_kwargs: Additional kwargs for IRL training
-            rl_train_kwargs: Additional kwargs for RL training
+            total_timesteps: Total timesteps for final RL training.
+            bc_train_kwargs: Additional kwargs for BC training.
+            irl_train_kwargs: Additional kwargs for IRL training.
+            rl_train_kwargs: Additional kwargs for RL training.
+            retrain: Which pipeline steps to force-retrain even when cached
+                artefacts already exist on disk.  Accepts:
+
+                * ``None`` (default) – use cached results for every step.
+                * ``"all"`` – force every step to retrain.
+                * A sequence of step names chosen from
+                  ``("bc", "rollouts", "mpc", "ranking", "irl", "rl")``.
+
+                Example – retrain only the reward network and final policy::
+
+                    trainer.train(1_000_000, retrain=["irl", "rl"])
 
         Returns:
-            Dictionary containing training statistics
+            Dictionary containing training statistics.
         """
+        if retrain == "all":
+            force = set(self.STEPS)
+        elif retrain is None:
+            force: set = set()
+        else:
+            unknown = set(retrain) - set(self.STEPS)
+            if unknown:
+                raise ValueError(
+                    f"Unknown step name(s) in retrain: {unknown}. "
+                    f"Valid names are: {self.STEPS}"
+                )
+            force = set(retrain)
+
         stats = {}
 
         # Step 1: Train BC policy
         self._logger.log("Starting behavioral cloning training...")
-        bc_stats = self._train_bc_policy(**(bc_train_kwargs or {}))
+        bc_stats = self._train_bc_policy(force_retrain="bc" in force, **(bc_train_kwargs or {}))
         stats["bc"] = bc_stats
 
         # Step 2: Generate noisy rollouts
         self._logger.log("Generating noisy rollouts...")
-        rollout_stats = self._generate_noisy_rollouts()
+        rollout_stats = self._generate_noisy_rollouts(force_retrain="rollouts" in force)
         stats["rollouts"] = rollout_stats
 
         # Step 3: Apply robust tube MPC and augment data
         self._logger.log("Applying robust tube MPC and augmenting data...")
-        augmentation_stats = self._augment_data_with_mpc()
+        augmentation_stats = self._augment_data_with_mpc(force_retrain="mpc" in force)
         stats["augmentation"] = augmentation_stats
 
         # Step 4: Build ranked dataset
         self._logger.log("Building ranked dataset...")
-        ranking_stats = self._build_ranked_dataset()
+        ranking_stats = self._build_ranked_dataset(force_retrain="ranking" in force)
         stats["ranking"] = ranking_stats
 
         # Step 5: Train reward network using demonstration ranked IRL
         self._logger.log("Training reward network with demonstration ranked IRL...")
-        irl_stats = self._train_reward_network(**(irl_train_kwargs or {}))
+        irl_stats = self._train_reward_network(force_retrain="irl" in force, **(irl_train_kwargs or {}))
         stats["irl"] = irl_stats
 
         # Step 6: Train final policy using RL
         self._logger.log("Training final policy using RL...")
-        rl_stats = self._train_final_policy(total_timesteps, **(rl_train_kwargs or {}))
+        rl_stats = self._train_final_policy(total_timesteps, force_retrain="rl" in force, **(rl_train_kwargs or {}))
         stats["rl"] = rl_stats
 
         return stats
 
-    def _train_bc_policy(self, **kwargs) -> Dict[str, Any]:
+    def _train_bc_policy(self, force_retrain: bool = False, **kwargs) -> Dict[str, Any]:
         """Obtain the initial suboptimal policy (Step 1).
 
         * **Demonstrations mode**: trains (or loads a cached) BC policy from
           the supplied trajectory data.
         * **Policy mode**: the policy was supplied at construction time, so
           this step only evaluates it and returns statistics.
+
+        Args:
+            force_retrain: If ``True``, retrain the BC policy even if a cached
+                policy already exists on disk.
         """
         save_initial_bc_policy_dir = os.path.join(self.save_dir, "initial_BC_policy")
         object.__setattr__(self, 'save_initial_bc_policy_dir', save_initial_bc_policy_dir)
@@ -263,7 +295,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             logger.info("Skipping BC training: suboptimal policy was provided directly.")
         else:
             # Demonstrations mode: train or load a cached BC policy.
-            if os.path.exists(save_initial_bc_policy_dir):
+            if os.path.exists(save_initial_bc_policy_dir) and not force_retrain:
                 print("Loading existing BC policy...")
                 self.bc_policy = bc.reconstruct_policy(
                     save_initial_bc_policy_dir, device=self.device)
@@ -288,12 +320,29 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             "mean_length": np.mean([len(traj) for traj in bc_rollouts]),
         }
 
-    def _generate_noisy_rollouts(self) -> Dict[str, Any]:
-        """Generate rollouts with different noise levels."""
+    def _generate_noisy_rollouts(self, force_retrain: bool = False) -> Dict[str, Any]:
+        """Generate rollouts with different noise levels.
+
+        Args:
+            force_retrain: If ``True``, regenerate rollouts even if a cached
+                file already exists on disk.
+        """
         if self.bc_policy is None:
             raise ValueError(
                 "BC policy must be trained/loaded before generating noisy rollouts"
             )
+
+        noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
+        if os.path.exists(noisy_rollouts_path) and not force_retrain:
+            print("Loading existing noisy rollouts...")
+            with open(noisy_rollouts_path, "rb") as f:
+                self.noisy_rollouts = pickle.load(f)
+            total_rollouts = sum(len(r) for r in self.noisy_rollouts)
+            return self.noisy_rollouts, {
+                "total_rollouts": total_rollouts,
+                "noise_levels": list(self.noise_levels),
+                "rollouts_per_level": [len(r) for r in self.noisy_rollouts],
+            }
 
         self.noisy_rollouts = []
         total_rollouts = 0
@@ -302,7 +351,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         os.makedirs(noisy_policies_dir, exist_ok=True)
 
         base_policy_path = os.path.join(noisy_policies_dir, "base_policy.pt")
-        if not os.path.exists(base_policy_path):
+        if not os.path.exists(base_policy_path) or force_retrain:
             util.save_policy(self.bc_policy, base_policy_path)
 
         noisy_policies_metadata = []
@@ -374,7 +423,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             "rollouts_per_level": [len(rollouts) for rollouts in self.noisy_rollouts],
         }
 
-    def _augment_data_with_mpc(self, force_recompute: bool = False) -> List[List[List[types.TrajectoryWithRew]]]:
+    def _augment_data_with_mpc(self, force_retrain: bool = False) -> List[List[List[types.TrajectoryWithRew]]]:
         """Apply robust tube MPC to augment the noisy rollouts.
         Suppose we have S different noise levels. 
         For each noise level, we have K base trajectory rollouts of length T resulting from RTMPC.
@@ -407,7 +456,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         # Check if augmented data and rtmpc trajectories already exists in the save directory
         augmented_data_path = os.path.join(self.save_dir, "augmented_data")
         rtmpc_trajectories_path = os.path.join(self.save_dir, "rtmpc_trajectories")
-        if os.path.exists(augmented_data_path) and os.path.exists(rtmpc_trajectories_path) and not force_recompute:
+        if os.path.exists(augmented_data_path) and os.path.exists(rtmpc_trajectories_path) and not force_retrain:
             for noise_level in self.noise_levels:
                 augmented_data_for_noise_level_path = os.path.join(augmented_data_path, f"noise_{noise_level:.2f}.pkl")
                 rtmpc_trajectories_for_noise_level_path = os.path.join(rtmpc_trajectories_path, f"noise_{noise_level:.2f}.pkl")
@@ -445,13 +494,17 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         
         return self.augmented_data, self.rtmpc_trajectories
 
-    def _build_ranked_dataset(self) -> RankedTransitionsDataset:
-        """Build ranked dataset from augmented data."""
+    def _build_ranked_dataset(self, force_retrain: bool = False) -> RankedTransitionsDataset:
+        """Build ranked dataset from augmented data.
 
+        Args:
+            force_retrain: If ``True``, rebuild the ranked dataset even if a
+                cached file already exists on disk.
+        """
         ranked_path = os.path.join(self.save_dir, "ranked_samples.pth")
 
         # First, check if ranked samples already exist in the save directory
-        if os.path.exists(ranked_path):
+        if os.path.exists(ranked_path) and not force_retrain:
             saved = th.load(ranked_path)
             self.ranked_dataset = RankedTransitionsDataset(
                 demonstrations=self.augmented_data,
@@ -494,12 +547,15 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
         return self.ranked_dataset
 
-    def _train_reward_network(self, **kwargs) -> Dict[str, Any]:
-        """Train reward network using demonstration ranked IRL."""
+    def _train_reward_network(self, force_retrain: bool = False, **kwargs) -> Dict[str, Any]:
+        """Train reward network using demonstration ranked IRL.
 
-        # check if reward network already exists in the save directory
-        reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth") 
-        if os.path.exists(reward_net_path):
+        Args:
+            force_retrain: If ``True``, retrain the reward network even if a
+                cached checkpoint already exists on disk.
+        """
+        reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth")
+        if os.path.exists(reward_net_path) and not force_retrain:
             reward_net = TrajectoryRewardNet(
                 observation_space=self.venv.observation_space,
                 action_space=self.venv.action_space,

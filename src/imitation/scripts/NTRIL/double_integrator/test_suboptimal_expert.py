@@ -20,8 +20,13 @@ def main():
     env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
 
     # load final policy
-    final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
-    final_policy = PPO.load(final_policy_path, device="cuda")
+    # final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
+    # final_policy = PPO.load(final_policy_path, device="cuda")
+
+    # load suboptimal policy
+    suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
+        observation_space=env_policy.observation_space,
+        action_space=env_policy.action_space)
 
     device = "cuda"
     if device == "mps":
@@ -41,11 +46,8 @@ def main():
     )
     mpc_policy.setup()
 
-    suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
-        observation_space=env_policy.observation_space,
-        action_space=env_policy.action_space,
-    )
-    suboptimal_policy.set_K_values(mpc_policy.K[0,0], mpc_policy.K[0,1])
+    K = [0.02, 0.3]
+    suboptimal_policy.set_K_values(K[0], K[1])
 
     for j in range(1):
         obs, info = env_policy.reset()
