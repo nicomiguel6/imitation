@@ -387,7 +387,7 @@ class RobustTubeMPC:
     def augment_trajectory(
         self,
         trajectory: types.Trajectory,
-        partial_horizon: int = 20,
+        partial_horizon: int = 50,
         k_timesteps: int = 5,
         n_augmentations: int = 5,
     ) -> Sequence[types.TrajectoryWithRew]:

@@ -6,23 +6,25 @@ data augmentation, serving as a comparison baseline for NTRIL.
 Pipeline (NTRIL steps 1, 2, 4, 5, 6 — step 3 omitted):
   Step 1: Set up suboptimal policy (epsilon-greedy PID controller)
   Step 2: Generate noisy rollouts at varying noise levels
-  Step 4: Build ranked dataset directly from noisy rollouts
-  Step 5: Train reward network via demonstration-ranked IRL
-  Step 6: Train final policy via RL with the learned reward
+  Step 4: Build n_ensemble ranked datasets directly from noisy rollouts
+  Step 5: Train n_ensemble reward networks via demonstration-ranked IRL
+  Step 6: Train final policy via RL using the ensemble-averaged reward
+
+The only structural difference from NTRILTrainer is the data source for
+Step 4: DREX feeds noisy rollouts directly into the ranked dataset, whereas
+NTRILTrainer first augments those rollouts with the robust tube MPC (Step 3).
+All ensemble training logic lives in the shared NTRILTrainer base class.
 """
 
+import dataclasses
 import os
 import pickle
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Union
 
 import numpy as np
-import torch as th
 
-from imitation.data import rollout
 from imitation.data.wrappers import RolloutInfoWrapper
-from imitation.rewards.reward_nets import TrajectoryRewardNet
-from imitation.scripts.NTRIL.demonstration_ranked_irl import RankedTransitionsDataset
 from imitation.scripts.NTRIL.double_integrator.double_integrator import (
     DoubleIntegratorSuboptimalPolicy,
 )
@@ -33,13 +35,22 @@ from imitation.util import util
 import gymnasium as gym
 
 
+@dataclasses.dataclass
 class DREXTrainer(NTRILTrainer):
     """DREX baseline trainer.
 
-    Extends :class:`NTRILTrainer` but skips MPC data augmentation (Step 3),
-    building the ranked dataset directly from the noisy rollouts produced in
-    Step 2.  All other pipeline steps are inherited unchanged.
+    Inherits all ensemble training logic from :class:`NTRILTrainer`.  The
+    only override is :meth:`_get_ranked_dataset_source`, which returns
+    ``self.noisy_rollouts`` instead of MPC-augmented data so that Step 3
+    (robust tube MPC) is bypassed.
+
+    The ``train()`` method is also overridden to skip Step 3 in the
+    pipeline loop.
     """
+
+    # ------------------------------------------------------------------
+    # Pipeline orchestration
+    # ------------------------------------------------------------------
 
     def train(
         self,
@@ -49,17 +60,16 @@ class DREXTrainer(NTRILTrainer):
         rl_train_kwargs: Optional[Mapping[str, Any]] = None,
         retrain: Union[str, Sequence[str], None] = None,
     ) -> Dict[str, Any]:
-        """Run the DREX pipeline (Steps 1, 2, 4, 5, 6; Step 3 omitted).
+        """Run the DREX pipeline (Steps 1, 2, 4, 5, 6 — Step 3 omitted).
 
         Args:
             total_timesteps: Total timesteps for final RL training.
             bc_train_kwargs: Extra kwargs forwarded to BC training.
             irl_train_kwargs: Extra kwargs forwarded to IRL training.
             rl_train_kwargs: Extra kwargs forwarded to RL training.
-            retrain: Which pipeline steps to force-retrain even when cached
-                artefacts already exist.  Accepts ``None`` (use cache),
-                ``"all"``, or a list of names from
-                ``("bc", "rollouts", "ranking", "irl", "rl")``.
+            retrain: Which steps to force-retrain even when cached artefacts
+                exist.  Accepts ``None`` (use cache), ``"all"``, or a list of
+                names from ``("bc", "rollouts", "ranking", "irl", "rl")``.
 
         Returns:
             Dictionary of per-step training statistics.
@@ -79,34 +89,35 @@ class DREXTrainer(NTRILTrainer):
 
         stats: Dict[str, Any] = {}
 
-        # Step 1: Obtain suboptimal policy (trains BC, or reuses provided policy).
         self._logger.log("Step 1: Obtaining suboptimal policy...")
-        bc_stats = self._train_bc_policy(
+        stats["bc"] = self._train_bc_policy(
             force_retrain="bc" in force, **(bc_train_kwargs or {})
         )
-        stats["bc"] = bc_stats
 
-        # Step 2: Generate noisy rollouts at varying epsilon-greedy noise levels.
         self._logger.log("Step 2: Generating noisy rollouts...")
         _, rollout_stats = self._generate_noisy_rollouts(
             force_retrain="rollouts" in force
         )
         stats["rollouts"] = rollout_stats
 
-        # Step 4: Build ranked dataset directly from noisy rollouts (no MPC).
-        self._logger.log("Step 4: Building ranked dataset from noisy rollouts...")
+        self._logger.log(
+            f"Step 4: Building {self.n_ensemble} ranked datasets from noisy rollouts..."
+        )
         self._build_ranked_dataset(force_retrain="ranking" in force)
-        stats["ranking"] = {"num_samples": len(self.ranked_dataset)}
+        stats["ranking"] = {
+            f"dataset_{i}_num_samples": len(ds)
+            for i, ds in enumerate(self.ranked_datasets)
+        }
 
-        # Step 5: Train reward network via demonstration-ranked IRL.
-        self._logger.log("Step 5: Training reward network via IRL...")
+        self._logger.log(
+            f"Step 5: Training {self.n_ensemble} reward networks via IRL..."
+        )
         self._train_reward_network(
             force_retrain="irl" in force, **(irl_train_kwargs or {})
         )
-        stats["irl"] = {}
+        stats["irl"] = {"n_ensemble": self.n_ensemble}
 
-        # Step 6: Train final policy via RL with the learned reward.
-        self._logger.log("Step 6: Training final policy via RL...")
+        self._logger.log("Step 6: Training final policy via RL (ensemble reward)...")
         self._train_final_policy(
             total_timesteps=total_timesteps,
             force_retrain="rl" in force,
@@ -116,33 +127,15 @@ class DREXTrainer(NTRILTrainer):
 
         return stats
 
-    def _build_ranked_dataset(self, force_retrain: bool = False) -> RankedTransitionsDataset:
-        """Build ranked dataset from noisy rollouts (Step 4).
+    # ------------------------------------------------------------------
+    # Data source override
+    # ------------------------------------------------------------------
 
-        Unlike the parent class, which uses MPC-augmented data, this method
-        feeds the noisy rollouts directly into :class:`RankedTransitionsDataset`,
-        skipping Step 3 entirely.
+    def _get_ranked_dataset_source(self) -> list:
+        """Return noisy rollouts as the ranked-dataset data source.
 
-        Args:
-            force_retrain: Rebuild even when a cached file exists on disk.
-
-        Returns:
-            The populated :class:`RankedTransitionsDataset`.
+        Overrides the parent, which uses MPC-augmented trajectories.
         """
-        ranked_path = os.path.join(self.save_dir, "ranked_samples.pth")
-
-        if os.path.exists(ranked_path) and not force_retrain:
-            saved = th.load(ranked_path)
-            self.ranked_dataset = RankedTransitionsDataset(
-                demonstrations=None,
-                training_samples=saved["samples"],
-                num_snippets=saved["num_snippets"],
-                min_segment_length=saved["min_segment_length"],
-                max_segment_length=saved["max_segment_length"],
-            )
-            return self.ranked_dataset
-
-        # Ensure noisy rollouts are available.
         if not self.noisy_rollouts:
             noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
             if os.path.exists(noisy_rollouts_path):
@@ -152,36 +145,19 @@ class DREXTrainer(NTRILTrainer):
                 raise ValueError(
                     "Noisy rollouts not found. Run _generate_noisy_rollouts() first."
                 )
+        return self.noisy_rollouts
 
-        # Build dataset directly from noisy rollouts — no augmentation.
-        self.ranked_dataset = RankedTransitionsDataset(
-            demonstrations=self.noisy_rollouts,
-            num_snippets=100,
-            min_segment_length=20,
-            max_segment_length=20,
-        )
 
-        training_samples = [
-            self.ranked_dataset[i] for i in range(len(self.ranked_dataset))
-        ]
-        th.save(
-            {
-                "samples": training_samples,
-                "num_snippets": self.ranked_dataset.num_snippets,
-                "min_segment_length": self.ranked_dataset.min_segment_length,
-                "max_segment_length": self.ranked_dataset.max_segment_length,
-            },
-            ranked_path,
-        )
-
-        return self.ranked_dataset
-
+# ---------------------------------------------------------------------------
+# Convenience entry-points
+# ---------------------------------------------------------------------------
 
 def run_drex_training(
     env_id: str = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0",
     save_dir: str = "./drex_outputs",
     noise_levels: tuple = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
     n_rollouts_per_noise: int = 10,
+    n_ensemble: int = 3,
     rl_total_timesteps: int = 1_000_000,
     retrain: Optional[Union[str, Sequence[str]]] = None,
 ) -> DREXTrainer:
@@ -192,6 +168,7 @@ def run_drex_training(
         save_dir: Directory for all saved artefacts.
         noise_levels: Epsilon-greedy noise levels for rollout generation.
         n_rollouts_per_noise: Number of rollouts collected per noise level.
+        n_ensemble: Number of reward networks in the ensemble.
         rl_total_timesteps: Total timesteps for the final RL training step.
         retrain: Steps to force-retrain (``None``, ``"all"``, or a list of
             names from ``("bc", "rollouts", "ranking", "irl", "rl")``).
@@ -204,6 +181,7 @@ def run_drex_training(
     print("=" * 70)
     print(f"\nEnvironment : {env_id}")
     print(f"Noise levels: {noise_levels}")
+    print(f"Ensemble    : {n_ensemble} reward networks")
     print(f"Save dir    : {save_dir}")
 
     rng = np.random.default_rng(42)
@@ -221,17 +199,6 @@ def run_drex_training(
         format_strs=["stdout", "tensorboard", "csv"],
     )
 
-    reward_net = TrajectoryRewardNet(
-        observation_space=venv.observation_space,
-        action_space=venv.action_space,
-        use_state=True,
-        use_action=False,
-        use_next_state=False,
-        use_done=False,
-        hid_sizes=(256, 256),
-    )
-
-    # Build the suboptimal PID policy for the double integrator.
     ghost_env = gym.make(env_id)
     suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
         observation_space=ghost_env.observation_space,
@@ -246,7 +213,7 @@ def run_drex_training(
         custom_logger=custom_logger,
         noise_levels=noise_levels,
         n_rollouts_per_noise=n_rollouts_per_noise,
-        reward_net=reward_net,
+        n_ensemble=n_ensemble,
         irl_batch_size=32,
         irl_lr=1e-3,
         save_dir=save_dir,
@@ -279,8 +246,9 @@ def main():
     run_drex_training(
         env_id="imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0",
         save_dir=str(SAVE_DIR),
-        noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
-        n_rollouts_per_noise=16,
+        noise_levels=tuple(np.arange(0.0, 1.0, 0.05)),
+        n_rollouts_per_noise=5,
+        n_ensemble=3,
         rl_total_timesteps=1_000_000,
         retrain=None,
     )

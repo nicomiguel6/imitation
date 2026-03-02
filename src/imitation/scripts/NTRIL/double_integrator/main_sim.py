@@ -868,9 +868,9 @@ def main():
         noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
         n_rollouts_per_noise=10,
         rl_total_timesteps=1_000_000,
-        run_individual_steps=[1,2],
-        retrain=["bc", "rollouts"],
-        just_plot_noisy_rollouts=True,
+        run_individual_steps=[1,2,3,4,5,6],
+        retrain=["bc", "rollouts", "mpc", "ranking", "irl", "rl"],
+        just_plot_noisy_rollouts=False,
         robust_mpc=robust_tube_mpc,
     )
 

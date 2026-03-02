@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch as th
-import random
 import torch.nn as nn
 from stable_baselines3.common import vec_env
 from torch.utils.data import DataLoader, Dataset
@@ -23,8 +22,9 @@ class RankedTransitionsDataset(Dataset):
         demonstrations: Optional[List[Sequence[types.TrajectoryWithRew]]] = None,
         training_samples: Optional[List[Tuple[Tuple[np.ndarray, np.ndarray], int]]] = None,
         num_snippets: int = 10,
-        min_segment_length: int = 50,
-        max_segment_length: int = 100,
+        min_segment_length: int = 5,
+        max_segment_length: int = 30,
+        rng: Optional[np.random.Generator] = None,
     ):
         """Initialize ranked transitions dataset.
 
@@ -40,6 +40,9 @@ class RankedTransitionsDataset(Dataset):
                 building from demonstrations.
             min_segment_length: Minimum length of segments extracted from a trajectory.
             max_segment_length: Maximum length of segments extracted from a trajectory.
+            rng: Optional seeded random generator.  Pass distinct generators to
+                produce independent snippet draws for ensemble members.  If
+                ``None``, a fresh unseeded generator is created.
         """
         if demonstrations is None and training_samples is None:
             raise ValueError("Either demonstrations or training samples must be provided")
@@ -47,6 +50,7 @@ class RankedTransitionsDataset(Dataset):
         self.num_snippets = num_snippets
         self.min_segment_length = min_segment_length
         self.max_segment_length = max_segment_length
+        self.rng: np.random.Generator = rng if rng is not None else np.random.default_rng()
         self.demo_dict = {}
         self.demonstrations = []
         self.training_data = {"traj": [], "label": []}
@@ -93,27 +97,32 @@ class RankedTransitionsDataset(Dataset):
         Preference pairs are labeled purely by noise level: lower noise epsilon
         is assumed to be better. Start indices are sampled independently per
         trajectory, so no temporal ordering is imposed across noise bins.
+
+        All randomness goes through ``self.rng`` so that ensemble members
+        constructed with different seeds produce independent snippet draws.
         """
-        step = 2
+        step = 1
         noise_levels = list(self.demo_dict.keys())
 
         for _ in range(self.num_snippets):
-            # Pick two distinct noise levels at random.
+            # Pick two distinct noise levels at random, but make sure they are not within 0.3 of each other
             ni, nj = 0, 0
-            while ni == nj:
-                ni = np.random.randint(len(noise_levels))
-                nj = np.random.randint(len(noise_levels))
+            while ni == nj and abs(noise_levels[ni] - noise_levels[nj]) < 0.3:
+                ni = int(self.rng.integers(len(noise_levels)))
+                nj = int(self.rng.integers(len(noise_levels)))
 
             # Pick a random trajectory from each noise bin.
-            ti = random.choice(self.demo_dict[noise_levels[ni]])
-            tj = random.choice(self.demo_dict[noise_levels[nj]])
+            bin_i = self.demo_dict[noise_levels[ni]]
+            bin_j = self.demo_dict[noise_levels[nj]]
+            ti = bin_i[int(self.rng.integers(len(bin_i)))]
+            tj = bin_j[int(self.rng.integers(len(bin_j)))]
 
             # Sample a shared segment length, capped to whichever trajectory is shorter.
             if self.min_segment_length == self.max_segment_length:
                 rand_length = self.min_segment_length
             else:
-                rand_length = np.random.randint(
-                    self.min_segment_length, self.max_segment_length
+                rand_length = int(
+                    self.rng.integers(self.min_segment_length, self.max_segment_length)
                 )
             rand_length = min(rand_length, len(ti.obs), len(tj.obs))
             if rand_length < 1:
@@ -123,8 +132,8 @@ class RankedTransitionsDataset(Dataset):
                 )
 
             # Sample start indices independently — no temporal ordering imposed.
-            ti_start = np.random.randint(len(ti.obs) - rand_length + 1)
-            tj_start = np.random.randint(len(tj.obs) - rand_length + 1)
+            ti_start = int(self.rng.integers(len(ti.obs) - rand_length + 1))
+            tj_start = int(self.rng.integers(len(tj.obs) - rand_length + 1))
 
             snip_i = ti.obs[ti_start : ti_start + rand_length : step]
             snip_j = tj.obs[tj_start : tj_start + rand_length : step]
@@ -232,46 +241,67 @@ class DemonstrationRankedIRL(base.BaseImitationAlgorithm):
     def train(
         self,
         train_dataloader: DataLoader,
-        n_epochs: int = 100,
-        eval_interval: int = 1,
+        n_epochs: Optional[int] = None,
+        n_steps: Optional[int] = None,
+        log_interval: int = 100,
         **kwargs,
     ) -> Dict[str, Any]:
         """Train the reward network using ranked demonstrations.
 
+        Exactly one of ``n_epochs`` or ``n_steps`` must be provided.  Use
+        ``n_steps`` to match paper-reported optimizer step counts directly,
+        regardless of dataset size or batch size.
+
         Args:
-            demonstrations: Expert demonstration trajectories
-            ranked_dataset: Ranked transitions dataset
-            n_epochs: Number of training epochs
-            eval_interval: Interval for evaluation
-            **kwargs: Additional training arguments
+            train_dataloader: DataLoader over a :class:`RankedTransitionsDataset`.
+            n_epochs: Number of full passes through the dataloader.  Mutually
+                exclusive with ``n_steps``.
+            n_steps: Total number of gradient-update steps.  The dataloader is
+                cycled as many times as necessary.  Mutually exclusive with
+                ``n_epochs``.
+            log_interval: Log training loss every this many optimizer steps.
 
         Returns:
-            Training statistics
+            Dictionary with ``step_losses`` (loss at each optimizer step).
         """
-        # Create dataloader
+        if (n_epochs is None) == (n_steps is None):
+            raise ValueError("Provide exactly one of n_epochs or n_steps.")
+
         self.train_dataloader = train_dataloader
 
-        # Training loop
-        stats = {
-            "epoch_losses": [],
-            "ranking_losses": [],
-            "preference_losses": [],
-            "regularization_losses": [],
-        }
+        stats: Dict[str, Any] = {"step_losses": []}
 
-        for epoch in range(n_epochs):
-            epoch_loss = self._train_epoch()
-            stats["epoch_losses"].append(epoch_loss)
+        self.reward_net.train()
+        step = 0
 
-            if epoch % eval_interval == 0:
-                self._logger.log(f"Epoch {epoch}: Loss = {epoch_loss:.6f}")
+        if n_steps is not None:
+            # Step-based loop: cycle through the dataloader until n_steps reached.
+            dataloader_iter = iter(train_dataloader)
+            while step < n_steps:
+                try:
+                    batch = next(dataloader_iter)
+                except StopIteration:
+                    dataloader_iter = iter(train_dataloader)
+                    batch = next(dataloader_iter)
 
-                # # Evaluate reward network
-                # eval_stats = self._evaluate_reward_net(demonstrations, ranked_dataset)
-                # for key, value in eval_stats.items():
-                #     if key not in stats:
-                #         stats[key] = []
-                #     stats[key].append(value)
+                segment_pairs, label = batch
+                self.optimizer.zero_grad()
+                loss = self._compute_loss(segment_pairs, label)
+                loss.backward()
+                self.optimizer.step()
+
+                stats["step_losses"].append(loss.item())
+                step += 1
+                if step % log_interval == 0:
+                    self._logger.log(f"Step {step}/{n_steps}: loss = {loss.item():.6f}")
+        else:
+            # Epoch-based loop (original behaviour).
+            for epoch in range(n_epochs):
+                epoch_loss = self._train_epoch()
+                stats["step_losses"].append(epoch_loss)
+                step += 1
+                if step % log_interval == 0:
+                    self._logger.log(f"Epoch {epoch}/{n_epochs}: loss = {epoch_loss:.6f}")
 
         return stats
 

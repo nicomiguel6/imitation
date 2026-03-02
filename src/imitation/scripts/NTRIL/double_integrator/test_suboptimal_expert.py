@@ -20,13 +20,18 @@ def main():
     env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
 
     # load final policy
-    # final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
-    # final_policy = PPO.load(final_policy_path, device="cuda")
+    final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
+    final_policy = PPO.load(final_policy_path, device="cuda")
 
-    # load suboptimal policy
+    # # load pure drex policy
+    # drex_policy_path = SCRIPT_DIR / "drex_outputs" / "final_policy" / "final_policy.zip"
+    # final_policy = PPO.load(drex_policy_path, device="cuda")
+
+    # Suboptimal policy
     suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
         observation_space=env_policy.observation_space,
-        action_space=env_policy.action_space)
+        action_space=env_policy.action_space,
+    )
 
     device = "cuda"
     if device == "mps":
@@ -60,8 +65,8 @@ def main():
         rewards_mpc = []
 
         for i in range(env_policy.unwrapped.max_episode_steps):
-            action_policy = suboptimal_policy._choose_action(obs)
-            # action_policy, _ = final_policy.predict(obs)
+            # action_policy = suboptimal_policy._choose_action(obs)
+            action_policy, _ = final_policy.predict(obs)
             _, action_mpc = mpc_policy.solve_mpc(obs_mpc)
             obs, reward, terminated, truncated, info = env_policy.step(action_policy)
             obs_mpc, reward_mpc, terminated_mpc, truncated_mpc, info_mpc = env_mpc.step(action_mpc)
@@ -75,16 +80,16 @@ def main():
                 break
 
         fig, ax = plt.subplots()
-        ax.plot(np.array(states_policy)[:, 0], "k-", label="Suboptimal Expert Trajectory")
+        ax.plot(np.array(states_policy)[:, 0], "k-", label="Final Policy Trajectory")
         ax.plot(np.array(states_mpc)[:, 0], "r-", label="MPC Trajectory")
         ax.set_xlabel("Time")
         ax.set_ylabel("Position")
-        ax.set_title("Trajectory Comparison of Suboptimal Expert and MPC")
+        ax.set_title("Trajectory Comparison of Final Policy and MPC")
         ax.legend()
         fig.savefig(SCRIPT_DIR / f"trajectory_comparison_{j}.png")
         plt.close()
 
-        print("Total suboptimal expert cost: ", sum(rewards_policy))
+        print("Total final policy cost: ", sum(rewards_policy))
         print("Total MPC cost: ", sum(rewards_mpc))
 
 

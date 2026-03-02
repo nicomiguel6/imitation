@@ -5,7 +5,6 @@ import json
 import pickle
 import logging
 import os
-import functools
 from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Dict, Mapping, Optional, Sequence, Union, List
@@ -76,6 +75,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     irl_lr: float = 1e-3
     save_dir: Optional[str] = None
     rng: int = 42
+    n_ensemble: int = 3
 
     # ------------------------------------------------------------------
     # Factory constructors
@@ -134,6 +134,12 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
     def __post_init__(self):
         """Initialize components after dataclass creation."""
+        # The dataclass-generated __init__ does not call super().__init__(), so
+        # BaseImitationAlgorithm.__init__ (which sets _logger) is never reached
+        # automatically.  We call it explicitly here so that _logger is always
+        # available throughout the class hierarchy (including DREXTrainer).
+        super().__init__(custom_logger=self.custom_logger)
+
         # Device setup
         if th.cuda.is_available():
             device = th.device("cuda:0")
@@ -192,6 +198,8 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         object.__setattr__(self, 'noisy_rollouts', [])
         object.__setattr__(self, 'augmented_data', [])
         object.__setattr__(self, 'ranked_dataset', None)
+        object.__setattr__(self, 'ranked_datasets', [])
+        object.__setattr__(self, 'reward_nets_ensemble', [])
         object.__setattr__(self, 'learned_reward_net', None)
         object.__setattr__(self, 'final_policy', None)
 
@@ -494,164 +502,194 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         
         return self.augmented_data, self.rtmpc_trajectories
 
-    def _build_ranked_dataset(self, force_retrain: bool = False) -> RankedTransitionsDataset:
-        """Build ranked dataset from augmented data.
+    def _build_ranked_dataset(self, force_retrain: bool = False) -> List[RankedTransitionsDataset]:
+        """Build K ranked datasets from the input trajectories (Step 4).
+
+        Each of the ``n_ensemble`` datasets is drawn with a different random
+        seed, giving ensemble members independent training data.  Files are
+        cached under ``<save_dir>/ensemble/ranked_samples_{i}.pth``.
+
+        The data source is determined by the subclass:
+        * :class:`NTRILTrainer` uses MPC-augmented trajectories
+          (``self.augmented_data``).
+        * :class:`DREXTrainer` uses the noisy rollouts directly
+          (``self.noisy_rollouts``).
 
         Args:
-            force_retrain: If ``True``, rebuild the ranked dataset even if a
-                cached file already exists on disk.
+            force_retrain: Rebuild all datasets even when cached files exist.
+
+        Returns:
+            List of :class:`RankedTransitionsDataset` (length ``n_ensemble``).
         """
-        ranked_path = os.path.join(self.save_dir, "ranked_samples.pth")
+        ensemble_dir = os.path.join(self.save_dir, "ensemble")
+        os.makedirs(ensemble_dir, exist_ok=True)
 
-        # First, check if ranked samples already exist in the save directory
-        if os.path.exists(ranked_path) and not force_retrain:
-            saved = th.load(ranked_path)
-            self.ranked_dataset = RankedTransitionsDataset(
-                demonstrations=self.augmented_data,
-                training_samples=saved["samples"],
-                num_snippets=saved["num_snippets"],
-                min_segment_length=saved["min_segment_length"],
-                max_segment_length=saved["max_segment_length"],
+        cache_paths = [
+            os.path.join(ensemble_dir, f"ranked_samples_{i}.pth")
+            for i in range(self.n_ensemble)
+        ]
+        all_cached = all(os.path.exists(p) for p in cache_paths)
+
+        if all_cached and not force_retrain:
+            self.ranked_datasets = []
+            for path in cache_paths:
+                saved = th.load(path)
+                self.ranked_datasets.append(
+                    RankedTransitionsDataset(
+                        demonstrations=None,
+                        training_samples=saved["samples"],
+                        num_snippets=saved["num_snippets"],
+                        min_segment_length=saved["min_segment_length"],
+                        max_segment_length=saved["max_segment_length"],
+                    )
+                )
+            self.ranked_dataset = self.ranked_datasets[0]
+            return self.ranked_datasets
+
+        # Resolve the data source: augmented_data for NTRIL, noisy_rollouts for DREX.
+        data_source = self._get_ranked_dataset_source()
+
+        self.ranked_datasets = []
+        for i in range(self.n_ensemble):
+            dataset = RankedTransitionsDataset(
+                demonstrations=data_source,
+                num_snippets=5_000,
+                min_segment_length=5,
+                max_segment_length=30,
+                rng=np.random.default_rng(i),
             )
-            return self.ranked_dataset
+            th.save(
+                {
+                    "samples": [dataset[j] for j in range(len(dataset))],
+                    "num_snippets": dataset.num_snippets,
+                    "min_segment_length": dataset.min_segment_length,
+                    "max_segment_length": dataset.max_segment_length,
+                },
+                cache_paths[i],
+            )
+            self.ranked_datasets.append(dataset)
 
-        # Otherwise, build ranked samples from augmented data
+        self.ranked_dataset = self.ranked_datasets[0]
+        return self.ranked_datasets
 
-        # First, check if augmented_data for noise levels already exist in the save directory
-        for noise_level in self.noise_levels:
-            augmented_data_path = os.path.join(self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl")
-            if os.path.exists(augmented_data_path):
-                augmented_data = serialize.load(os.path.join(self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl"))
-                self.augmented_data.append(augmented_data)
-            else:
-                raise ValueError(f"Augmented data not found at {augmented_data_path}. Please run _augment_data_with_mpc() first.")
+    def _get_ranked_dataset_source(self) -> list:
+        """Return the trajectory data used to build the ranked dataset.
 
-        self.ranked_dataset = RankedTransitionsDataset(
-            demonstrations=self.augmented_data,
-            num_snippets=100,  # default; can be parameterized
-            min_segment_length=20,
-            max_segment_length=20,
-        )
+        :class:`NTRILTrainer` uses MPC-augmented trajectories.
+        Subclasses can override this to supply a different data source
+        (e.g. :class:`DREXTrainer` returns ``self.noisy_rollouts``).
+        """
+        if not self.augmented_data:
+            for noise_level in self.noise_levels:
+                path = os.path.join(
+                    self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl"
+                )
+                if os.path.exists(path):
+                    self.augmented_data.append(serialize.load(path))
+                else:
+                    raise ValueError(
+                        f"Augmented data not found at {path}. "
+                        "Run _augment_data_with_mpc() first."
+                    )
+        return self.augmented_data
 
-        # Extract samples and save for reuse
-        training_samples = [self.ranked_dataset[i] for i in range(len(self.ranked_dataset))]
-        th.save(
-            {
-                "samples": training_samples,
-                "num_snippets": self.ranked_dataset.num_snippets,
-                "min_segment_length": self.ranked_dataset.min_segment_length,
-                "max_segment_length": self.ranked_dataset.max_segment_length,
-            },
-            ranked_path,
-        )
+    def _train_reward_network(self, force_retrain: bool = False, **kwargs) -> List[TrajectoryRewardNet]:
+        """Train one reward network per ranked dataset (Step 5).
 
-        return self.ranked_dataset
-
-    def _train_reward_network(self, force_retrain: bool = False, **kwargs) -> Dict[str, Any]:
-        """Train reward network using demonstration ranked IRL.
+        Defaults match the D-REX paper (Brown et al., 2020):
+        1 000 optimizer steps, lr=1e-4, batch_size=64, weight_decay=0.01.
+        Networks are cached under ``<save_dir>/ensemble/reward_net_{i}.pth``.
 
         Args:
-            force_retrain: If ``True``, retrain the reward network even if a
-                cached checkpoint already exists on disk.
-        """
-        reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth")
-        if os.path.exists(reward_net_path) and not force_retrain:
-            reward_net = TrajectoryRewardNet(
-                observation_space=self.venv.observation_space,
-                action_space=self.venv.action_space,
-                use_state=True,
-                use_action=False,
-                use_next_state=False,
-                use_done=False,
-                hid_sizes=(256, 256),
-            )
-            reward_net.load_state_dict(th.load(reward_net_path, map_location=self.device))
-            reward_net.to(self.device)
-            self.reward_net = reward_net
-            return self.reward_net
+            force_retrain: Retrain all networks even when cached files exist.
 
-        if self.ranked_dataset is None:
+        Returns:
+            List of trained :class:`TrajectoryRewardNet` (length ``n_ensemble``).
+        """
+        ensemble_dir = os.path.join(self.save_dir, "ensemble")
+        os.makedirs(ensemble_dir, exist_ok=True)
+
+        cache_paths = [
+            os.path.join(ensemble_dir, f"reward_net_{i}.pth")
+            for i in range(self.n_ensemble)
+        ]
+        all_cached = all(os.path.exists(p) for p in cache_paths)
+
+        if all_cached and not force_retrain:
+            self.reward_nets_ensemble = []
+            for path in cache_paths:
+                net = self._make_reward_net()
+                net.load_state_dict(th.load(path, map_location=self.device))
+                net.to(self.device)
+                self.reward_nets_ensemble.append(net)
+            return self.reward_nets_ensemble
+
+        if not self.ranked_datasets:
             self._build_ranked_dataset()
 
-        def my_collate(batch):
-            segment_data = [batch_data[0] for batch_data in batch]
-            labels = [batch_data[1] for batch_data in batch]
-            return segment_data, labels
+        batch_size = kwargs.get("batch_size", 64)
+        lr = kwargs.get("lr", 1e-4)
+        weight_decay = kwargs.get("weight_decay", 0.01)
+        n_steps = kwargs.get("n_steps", 1_000)
 
-        # Parse kwargs for batch size and other training parameters (set default values if they are not provided)
-        batch_size = kwargs.get("batch_size", self.irl_batch_size)
-        lr = kwargs.get("lr", self.irl_lr)
-        n_epochs = kwargs.get("n_epochs", 100)
-        weight_decay = kwargs.get("weight_decay", 1e-4)
-        ranking_loss_weight = kwargs.get("ranking_loss_weight", 1.0)
-        preference_loss_weight = kwargs.get("preference_loss_weight", 1.0)
-        regularization_weight = kwargs.get("regularization_weight", 1e-3)
-        segment_length = kwargs.get("segment_length", 20)
+        def _collate(batch):
+            return [b[0] for b in batch], [b[1] for b in batch]
 
-        # Set up dataloader
-        train_dataloader = DataLoader(
-            self.ranked_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=my_collate,
-        )
+        self.reward_nets_ensemble = []
+        for i, dataset in enumerate(self.ranked_datasets):
+            print(f"\n  [Ensemble {i + 1}/{self.n_ensemble}] Training reward network...")
+            dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=_collate,
+            )
+            net = self._make_reward_net()
+            learner = DemonstrationRankedIRL(
+                reward_net=net,
+                venv=self.venv,
+                batch_size=batch_size,
+                lr=lr,
+                weight_decay=weight_decay,
+                device=self.device,
+            )
+            learner.train(train_dataloader=dataloader, n_steps=n_steps)
+            th.save(net.state_dict(), cache_paths[i])
+            self.reward_nets_ensemble.append(net)
 
-        # Set up reward net
-        reward_net = TrajectoryRewardNet(
-            observation_space=self.venv.observation_space,
-            action_space=self.venv.action_space,
-            use_state=True,
-            use_action=False,
-            use_next_state=False,
-            use_done=False,
-            hid_sizes=(256, 256),
-        )
+        return self.reward_nets_ensemble
 
-        # Train reward network using demonstration ranked IRL
-        self.reward_learner = DemonstrationRankedIRL(reward_net=reward_net, venv=self.venv, batch_size=batch_size, device=self.device) 
+    def _train_final_policy(self, total_timesteps: int, force_retrain: bool = False, **kwargs):
+        """Train final policy via RL using the ensemble-averaged reward (Step 6).
 
-        self.reward_learner.train(train_dataloader=train_dataloader)
+        The reward signal is the mean prediction across all ``n_ensemble``
+        networks, which reduces variance compared to any single network.
 
-        # save reward network
-        save_dir = os.path.join(self.save_dir, "reward_net")
-        os.makedirs(save_dir, exist_ok=True)
-        th.save(self.reward_learner.reward_net.state_dict(), os.path.join(save_dir, "reward_net_state.pth"))
+        Args:
+            total_timesteps: Total environment steps for PPO.
+            force_retrain: Retrain even when a cached policy exists.
 
-        self.reward_learner.reward_net.to(self.device)
-
-        return self.reward_learner.reward_net
-
-    def _train_final_policy(self, total_timesteps: int, force_retrain: bool = False, **kwargs) -> Dict[str, Any]:
-        """Train final policy using RL with learned reward."""
-
-        # Check if final policy already exists in the save directory
+        Returns:
+            Trained :class:`PPO` agent.
+        """
         final_policy_path = os.path.join(self.save_dir, "final_policy", "final_policy.zip")
         if os.path.exists(final_policy_path) and not force_retrain:
             self.final_policy = PPO.load(final_policy_path)
             return self.final_policy
-        
-        # Check if reward network already exists in the save directory
-        reward_net_path = os.path.join(self.save_dir, "reward_net", "reward_net_state.pth")
-        if not os.path.exists(reward_net_path):
-            _ = self._train_reward_network()
-        else:
-            loaded_state = th.load(reward_net_path)
-            self.reward_net = TrajectoryRewardNet(
-                observation_space=self.venv.observation_space,
-                action_space=self.venv.action_space,
-                use_state=True,
-                use_action=False,
-                use_next_state=False,
-                use_done=False,
+
+        if not self.reward_nets_ensemble:
+            self._train_reward_network()
+
+        nets = self.reward_nets_ensemble
+
+        def ensemble_reward_fn(obs, acts, next_obs, dones):
+            return np.mean(
+                [net.predict_processed(obs, acts, next_obs, dones, update_stats=False)
+                 for net in nets],
+                axis=0,
             )
-            self.reward_net.load_state_dict(loaded_state)
 
-        # Set up RL training
-        relabel_reward_fn = functools.partial(
-            self.reward_net.predict_processed, update_stats=False
-        )
-
-        learned_reward_venv = RewardVecEnvWrapper(self.venv, relabel_reward_fn)
+        learned_reward_venv = RewardVecEnvWrapper(self.venv, ensemble_reward_fn)
         tb_log_dir = os.path.join(self.save_dir, "logs", "rl_step6")
         agent = PPO(
             "MlpPolicy",
@@ -660,11 +698,25 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             tensorboard_log=tb_log_dir,
         )
         agent.learn(total_timesteps=total_timesteps, progress_bar=True)
-        agent.save(os.path.join(self.save_dir, "final_policy", "final_policy.zip"))
-        self.final_policy = agent
-        print(f"Final policy saved to {os.path.join(self.save_dir, 'final_policy', 'final_policy.zip')}")
 
+        final_policy_dir = os.path.join(self.save_dir, "final_policy")
+        os.makedirs(final_policy_dir, exist_ok=True)
+        agent.save(final_policy_path)
+        self.final_policy = agent
+        print(f"Final policy saved to {final_policy_path}")
         return self.final_policy
+
+    def _make_reward_net(self) -> TrajectoryRewardNet:
+        """Construct a fresh reward network with the standard architecture."""
+        return TrajectoryRewardNet(
+            observation_space=self.venv.observation_space,
+            action_space=self.venv.action_space,
+            use_state=True,
+            use_action=False,
+            use_next_state=False,
+            use_done=False,
+            hid_sizes=(256, 256),
+        )
     
     def _solve_rtmpc(self, initial_state: np.ndarray, reference_trajectory: types.Trajectory) -> types.TrajectoryWithRew:
 

@@ -416,22 +416,22 @@ def plot_learned_reward_network(
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
     venv = gym.make(env_id)
 
-    # Load the learned reward network
-    reward_net_path = Path(save_dir) / "reward_net" / "reward_net_state.pth"
-    if not reward_net_path.exists():
-        raise FileNotFoundError(f"Reward network not found at {reward_net_path}")
-
-    reward_net = TrajectoryRewardNet(
-        observation_space=venv.observation_space,
-        action_space=venv.action_space,
-        use_state=True,
-        use_action=False,
-        use_next_state=False,
-        use_done=False,
-        hid_sizes=(256, 256),
-    )
-    reward_net.load_state_dict(th.load(reward_net_path, map_location=device))
-    reward_net.to(device)
+    # Load the learned reward network ensemble
+    reward_nets = []
+    n_ensemble = 3
+    for i in range(n_ensemble):
+        reward_net_path = Path(save_dir) / "ensemble" / f"reward_net_{i}.pth"
+        reward_net = TrajectoryRewardNet(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+            use_state=True,
+            use_action=False,
+            use_next_state=False,
+            use_done=False,
+            hid_sizes=(256, 256),
+        )
+        reward_net.load_state_dict(th.load(str(reward_net_path), map_location=device))
+        reward_nets.append(reward_net)
 
     # Build a meshgrid over (position, velocity) — the full 2D state space.
     n_grid = 100
@@ -442,8 +442,8 @@ def plot_learned_reward_network(
     # Flatten into (n_grid^2, 2) state matrix and evaluate R_θ(s).
     states_flat = np.stack([pos_grid.ravel(), vel_grid.ravel()], axis=1).astype(np.float32)
     with th.no_grad():
-        reward_flat = reward_net(th.from_numpy(states_flat).to(device))
-    reward_grid = reward_flat.cpu().numpy().reshape(n_grid, n_grid)
+        reward_flat = np.mean([reward_net.predict_processed(states_flat, np.zeros_like(states_flat), np.zeros_like(states_flat), np.zeros(states_flat.shape[0])) for reward_net in reward_nets], axis=0)  
+    reward_grid = reward_flat.reshape(n_grid, n_grid)
 
     # Plot as a filled contour over (position, velocity).
     fig, ax = plt.subplots(figsize=(7, 6))
