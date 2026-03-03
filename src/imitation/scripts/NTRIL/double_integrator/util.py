@@ -39,6 +39,7 @@ import matplotlib.pyplot as plt
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 DEFAULT_SAVE_DIR = SCRIPT_DIR / "ntril_outputs"
+DREX_SAVE_DIR = SCRIPT_DIR / "drex_outputs"
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +460,54 @@ def plot_learned_reward_network(
     print(f"Saved: {out_path}")
 
     return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# Investigate ranked dataset
+# ---------------------------------------------------------------------------
+
+def measure_ranking_separability(
+    ensemble_dir: str | Path = DEFAULT_SAVE_DIR,
+) -> None:
+    """Measure the ranking separability of the ranked dataset. Check each labeled snippet pair's reward difference."""
+
+    # Load all ranked datasets paths 
+    n_ensemble = 3
+    ranked_dataset_paths = [Path(ensemble_dir) / "ensemble" / f"ranked_samples_{i}.pth" for i in range(n_ensemble)]
+
+    
+    # define reward function using MPC cost
+    Q = np.diag([1000.0, 0.0])
+    R = 0.01 * np.eye(1)
+    def reward_function(states):
+        reward_tmp = []
+        for state in states:
+            reward_tmp.append(-state.T @ Q @ state)
+        return np.sum(reward_tmp).flatten()[0] # should be a scalar
+    
+
+    # Set up reward storing dictionary
+    reward_stats = {i: {'accuracy': [], 'reward': [], 'correct_count': 0, 'incorrect_count': 0} for i in range(n_ensemble)}
+    # Check each labeled snippet pair's reward difference
+    for idx, ranked_dataset_path in enumerate(ranked_dataset_paths):
+        ranked_dataset = th.load(str(ranked_dataset_path))
+        for snippet_pair, label in ranked_dataset['samples']:
+            reward_diff = reward_function(snippet_pair[0]) - reward_function(snippet_pair[1])
+            reward_stats[idx]['reward'].append(reward_diff)
+            if reward_diff > 0 and label == 0: # if reward_diff is positive and label is 0, then the first snippet is better and this is correct
+                reward_stats[idx]['correct_count'] += 1
+            elif reward_diff < 0 and label == 1: # if reward_diff is negative and label is 1, then the second snippet is better and this is correct
+                reward_stats[idx]['correct_count'] += 1
+            elif reward_diff > 0 and label == 1: # if reward_diff is positive and label is 1, then the first snippet is better and this is incorrect
+                reward_stats[idx]['incorrect_count'] += 1
+            elif reward_diff < 0 and label == 0: # if reward_diff is negative and label is 0, then the second snippet is better and this is incorrect
+                reward_stats[idx]['incorrect_count'] += 1
+        reward_stats[idx]['accuracy'].append(reward_stats[idx]['correct_count'] / (reward_stats[idx]['correct_count'] + reward_stats[idx]['incorrect_count']))
+
+    # Print the reward stats
+    for i in range(n_ensemble):
+        print(f"Ensemble {i}: Accuracy: {reward_stats[i]['accuracy']}, Correct count: {reward_stats[i]['correct_count']}, Incorrect count: {reward_stats[i]['incorrect_count']}")
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -482,6 +531,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--save-dir", type=str, default=str(DEFAULT_SAVE_DIR))
     sp.add_argument("--device", type=str, default="cuda")
 
+    sp = sub.add_parser("measure-ranking-separability", help="Measure the ranking separability of the ranked dataset")
+    sp.add_argument("--ensemble-dir", type=str, default=str(DEFAULT_SAVE_DIR))
+
     return p
 
 
@@ -503,9 +555,14 @@ if __name__ == "__main__":
             save_dir=args.save_dir,
             device=args.device,
         )
-    else:
-        plot_learned_reward_network(
-            save_dir=DEFAULT_SAVE_DIR,
-            device="cpu",
+    elif args.command == "measure-ranking-separability":
+        measure_ranking_separability(
+            ensemble_dir=args.ensemble_dir,
         )
+    else:
+        # plot_learned_reward_network(
+        #     save_dir=DEFAULT_SAVE_DIR,
+        #     device="cpu",
+        # )
+        measure_ranking_separability()
         # _build_parser().print_help()
