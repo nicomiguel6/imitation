@@ -5,5 +5,5 @@ from gymnasium.envs import register
 register(
     id="DoubleIntegrator-v0",
     entry_point="imitation.scripts.NTRIL.double_integrator.double_integrator:DoubleIntegratorEnv",
-    max_episode_steps=200,
+    max_episode_steps=None,  # env handles its own truncation via max_episode_seconds/dt
 )

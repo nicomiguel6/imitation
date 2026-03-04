@@ -18,6 +18,7 @@ from imitation.data import types
 from imitation.policies.base import NonTrainablePolicy
 from imitation.util import util
 from imitation.data import types
+from imitation.scripts.NTRIL.double_integrator.double_integrator import generate_reference_trajectory
 
 
 class RobustTubeMPC:
@@ -159,10 +160,13 @@ class RobustTubeMPC:
             self.disturbance_polytope = pytope.Polytope(self.disturbance_vertices)
 
             # Compute mrpi set
-            self.A_F, self.b_F = compute_mrpi_hrep(
-                self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b
-            )
-            self.Z = pytope.Polytope(self.A_F, self.b_F)
+            # self.A_F, self.b_F = compute_mrpi_hrep(
+            #     self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b
+            # )
+            # self.Z = pytope.Polytope(self.A_F, self.b_F)
+            self.Z = compute_approximate_linear_mrpi(self, disturbance_magnitude=self.disturbance_bound)
+            self.A_F = self.Z.A
+            self.b_F = self.Z.b
 
             # Tighten state and constraint bounds accordingly
             if self.state_bounds is not None:
@@ -320,6 +324,16 @@ class RobustTubeMPC:
             "Nominal and disturbed models, controller, and simulator setup completed!"
         )
 
+    def _extract_physical_state(self, obs: np.ndarray) -> np.ndarray:
+        """Return the physical state slice from a (possibly augmented) observation.
+
+        The environment observation may be augmented with reference states,
+        e.g. ``[pos, vel, ref_pos, ref_vel]``.  The MPC operates entirely in
+        physical state space (first ``state_dim`` elements), so every time an
+        observation flows into MPC machinery this method should be called first.
+        """
+        return np.asarray(obs).flatten()[:self.state_dim]
+
     def set_reference_trajectory(self, reference_trajectory: types.Trajectory) -> None:
         """Update the reference trajectory without rebuilding the MPC problem.
 
@@ -355,6 +369,11 @@ class RobustTubeMPC:
             raise ValueError(
                 "Must set MPC and Simulator objects before attempting to solve"
             )
+
+        if state.shape[0] > self.state_dim:
+            state = self._extract_physical_state(state)
+        else:
+            state = state.reshape(-1, 1)
 
         # Set initial state for MPC and simulator
         self.mpc.x0 = state
@@ -448,7 +467,7 @@ class RobustTubeMPC:
                         x_next = self.simulator.make_step(u0=u_applied)
                         # calculate tracking cost
                         tracking_cost = self._compute_tracking_cost_metric(
-                            trajectory.obs[t + t_step], x, trajectory.acts[t + t_step], u_applied, t + t_step
+                            self._extract_physical_state(trajectory.obs[t + t_step]), x, trajectory.acts[t + t_step], u_applied, t + t_step
                         )
                         # calculate margin to safety violation
                         margin_safety = self._compute_margin_safety_violation(x)
@@ -682,7 +701,9 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
     trajectories = [[] for _ in range(n_trajectories)]
     min_vals = [[np.inf for _ in range(env.observation_space.shape[0])] for _ in range(n_trajectories)]
     max_vals = [[-np.inf for _ in range(env.observation_space.shape[0])] for _ in range(n_trajectories)]
-    n_dim = env.observation_space.shape[0]
+
+    internal_state_dim = int(env.observation_space.shape[0]/2)
+
 
 
     # Set up ancillary controller
@@ -694,20 +715,21 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
     # Propagate trajectories forward
     for traj_idx in range(n_trajectories):
         # Set up zero initial state
-        initial_state = np.random.uniform(-0.1, 0.1, size=(env.observation_space.shape[0],)).astype(float)
+        initial_state = np.random.uniform(-0.1, 0.1, size=(internal_state_dim,)).astype(float)
         trajectories[traj_idx].append(initial_state)
         
         # set initial state to zero
         obs, info = env.reset(state=initial_state)
+        obs = obs[:internal_state_dim]
         for _ in range(total_time_steps):
-            disturbance = np.random.uniform(-disturbance_magnitude, disturbance_magnitude, size=env.observation_space.shape)
+            disturbance = np.random.uniform(-disturbance_magnitude, disturbance_magnitude, size=(internal_state_dim,))
             # get next state
             next_obs = robust_mpc.Ak @ obs.reshape(-1, 1) + disturbance.reshape(-1, 1)
             trajectories[traj_idx].append(next_obs.flatten())
             obs = next_obs.flatten()
 
             # update min and max values for each state
-            for i in range(env.observation_space.shape[0]):
+            for i in range(internal_state_dim):
                 if next_obs[i] < min_vals[traj_idx][i]:
                     min_vals[traj_idx][i] = next_obs[i]
                 if next_obs[i] > max_vals[traj_idx][i]:
@@ -715,7 +737,7 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
     
     # Compute initial mRPI set (minimum and maximum values for each state across all trajectories) and inflate by 5-10%
     initial_mrpis = []
-    for i in range(env.observation_space.shape[0]):
+    for i in range(internal_state_dim):
         min_val = np.min([min_vals[traj_idx][i] for traj_idx in range(n_trajectories)])
         max_val = np.max([max_vals[traj_idx][i] for traj_idx in range(n_trajectories)])
         initial_mrpis.append([min_val, max_val])
@@ -724,19 +746,19 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
     # Rebuild samples and retry whenever any corner violates the box — inflation can make
     # previously-passing corners violate again, so we must complete a clean pass each time.
     state_vertices = list(product(*[[lo,hi] for lo, hi in initial_mrpis]))
-    dist_vertices = list(product(*[[-disturbance_magnitude, disturbance_magnitude] for _ in range(n_dim)]))
+    dist_vertices = list(product(*[[-disturbance_magnitude, disturbance_magnitude] for _ in range(internal_state_dim)]))
 
     all_inside = False
     while not all_inside:
         all_inside = True
         # track worst violation
-        worst_low = [initial_mrpis[i][0] for i in range(n_dim)]
-        worst_high = [initial_mrpis[i][1] for i in range(n_dim)]
+        worst_low = [initial_mrpis[i][0] for i in range(internal_state_dim)]
+        worst_high = [initial_mrpis[i][1] for i in range(internal_state_dim)]
 
         for state_corner in state_vertices:
             for dist_corner in dist_vertices:
                 prop = robust_mpc.Ak @ np.array(state_corner).reshape(-1, 1) + np.array(dist_corner).reshape(-1, 1)
-                for i in range(n_dim):
+                for i in range(internal_state_dim):
                     if prop[i] < initial_mrpis[i][0] or prop[i] > initial_mrpis[i][1]:
                         all_inside = False
                     
@@ -744,7 +766,7 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
                     worst_high[i] = max(worst_high[i], prop[i])
                         
         if not all_inside:
-            for i in range(n_dim):
+            for i in range(internal_state_dim):
                 box_size = initial_mrpis[i][1] - initial_mrpis[i][0]
                 margin = 0.05 * max(box_size, 1e-6)
                 initial_mrpis[i][0] = min(initial_mrpis[i][0], worst_low[i] - margin)
@@ -752,7 +774,12 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
             
             # state_vertices = list(product(*[[lo,hi] for lo, hi in initial_mrpis]))
 
-    return initial_mrpis
+    # convert to points for pytope.Polytope
+    initial_mrpis = np.array(initial_mrpis).reshape(-1, internal_state_dim)
+    nd_array = np.array([initial_mrpis[i] for i in range(internal_state_dim)])
+    grid_points = np.meshgrid(*nd_array)
+    initial_mrpi_points = np.vstack(grid_points[i].flatten() for i in range(internal_state_dim)).T
+    return pytope.Polytope(initial_mrpi_points)
 
 def tighten_state_constraints(
     state_constraint_vertices: List[np.ndarray], A_F: np.ndarray, b_F: np.ndarray
@@ -1061,18 +1088,22 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
 
 
 if __name__ == "__main__": # test code
+    import matplotlib.pyplot as plt
 
     disturbance_magnitude = 0.1
     disturbance_vertices = np.array([[-disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude]])
     
+    dt = 0.1
     # Set up double integrator environment
-    env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", disturbance_magnitude=disturbance_magnitude)
-
+    env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=20.0, dt = dt)
+    # Set up reference trajectory
+    reference_trajectory = generate_reference_trajectory(T=env.max_episode_steps+1, dt=dt, mode="constant", target_position=0.0)
+    reference_trajectory_mpc = types.Trajectory(obs=reference_trajectory, acts=np.zeros((env.max_episode_steps, 1)), infos=np.array([{}] * env.max_episode_steps), terminal=True)
 
     # Set up robust tube MPC
     robust_mpc = RobustTubeMPC(
         horizon = 20,
-        time_step = 1.0,
+        time_step = dt,
         A = np.array([[0.0, 1.0], [0.0, 0.0]]),
         B = np.array([[0.0], [1.0]]),
         Q = np.diag([10.0, 1.0]),
@@ -1080,6 +1111,7 @@ if __name__ == "__main__": # test code
         # disturbance_vertices = disturbance_vertices,
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
         control_bounds = (np.array([-2.0]), np.array([2.0])),
+        # reference_trajectory = reference_trajectory_mpc,
     )
 
     robust_mpc.setup()
@@ -1087,3 +1119,25 @@ if __name__ == "__main__": # test code
     # Compute approximate linear mRPI set
     approximate_linear_mrpi = compute_approximate_linear_mrpi(robust_mpc, disturbance_magnitude=disturbance_magnitude)
     print(approximate_linear_mrpi)
+
+    # Run MPC for 100 steps and plot
+    obs, info = env.reset(options={"reference_trajectory": reference_trajectory})
+    states = []
+    actions = []
+    for _ in range(env.max_episode_steps):
+        nnn, action = robust_mpc.solve_mpc(obs)
+        action = action.flatten()
+        obs, reward, terminated, truncated, info = env.step(action)
+        states.append(obs)
+        actions.append(action)
+
+    # Plot states and actions
+    plt.plot(np.array(states)[:, 0], label="Position")
+    plt.plot(np.array(states)[:, 1], label="Velocity")
+    plt.plot(np.array(actions)[:, 0], label="Action")
+    plt.plot(reference_trajectory[:, 0], label="Reference Position")
+    plt.plot(reference_trajectory[:, 1], label="Reference Velocity")    
+    plt.legend()
+    plt.show()
+
+    a = 5

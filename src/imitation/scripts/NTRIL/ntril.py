@@ -820,6 +820,9 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         current_noise_level = reference_trajectory.infos[0].get("noise_level")
         total_applied_noise_sum = reference_trajectory.infos[-1].get("total_applied_noise_sum")
 
+        # Observation may be augmented; MPC operates on physical state only.
+        initial_state = self.robust_mpc._extract_physical_state(initial_state)
+
         self.robust_mpc.mpc.set_initial_guess()
         self.robust_mpc.mpc.x0 = initial_state
         self.robust_mpc.simulator.x0 = initial_state

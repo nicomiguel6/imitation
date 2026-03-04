@@ -846,7 +846,7 @@ def main():
     # print(f"  Mean return: {np.mean(returns):.2f} ± {np.std(returns):.2f}")
     # print(f"  Mean length: {np.mean(lengths):.2f} ± {np.std(lengths):.2f}")
 
-    # Step 2: Set up robust tube MPC for data augmentation
+    # Step 1: Set up robust tube MPC for data augmentation
     robust_tube_mpc = RobustTubeMPC(
         horizon = 10,
         time_step = 1.0,
@@ -863,7 +863,7 @@ def main():
 
     robust_tube_mpc.setup()
 
-    # Step 1: Set up suboptimal PID as initial policy
+    # Step 1.5: Set up suboptimal PID as initial policy
     suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
         observation_space=ghost_env.observation_space,
         action_space=ghost_env.action_space,
