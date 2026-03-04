@@ -13,6 +13,7 @@ Author: Nicolas Miguel
 Date: December 2025
 """
 
+import argparse
 import os
 from pathlib import Path
 import functools
@@ -576,108 +577,91 @@ def run_ntril_training(
         _force_set = set(retrain)
 
     if run_individual_steps is None:
-        print("\nStarting NTRIL training pipeline...")
-        training_stats = ntril_trainer.train(
-            total_timesteps=rl_total_timesteps,
-            bc_train_kwargs={"n_epochs": bc_epochs, "progress_bar": True},
-            irl_train_kwargs=irl_train_kwargs,
-            rl_train_kwargs=rl_train_kwargs,
-            retrain=retrain,
-        )
+        run_individual_steps = [1,2,3,4,5,6]
 
-        print("\n" + "=" * 70)
-        print("NTRIL Training Complete!")
-        print("=" * 70)
-        print("\nTraining Statistics:")
-        for stage, stats in training_stats.items():
-            print(f"\n{stage.upper()}:")
-            for key, value in stats.items():
-                print(f"  {key}: {value}")
+    # Run specific steps
+    print(f"\nRunning NTRIL steps: {run_individual_steps}")
+    step_results = {}
 
-    else:
-        # Run specific steps
-        print(f"\nRunning NTRIL steps: {run_individual_steps}")
-        step_results = {}
+    for step_num in sorted(run_individual_steps):
+        print(f"\n{'='*60}")
+        print(f"Running Step {step_num}")
+        print(f"{'='*60}")
 
-        for step_num in sorted(run_individual_steps):
-            print(f"\n{'='*60}")
-            print(f"Running Step {step_num}")
-            print(f"{'='*60}")
-
-            if step_num == 1: # Trains BC policy from suboptimal expert demonstrations
-                if suboptimal_policy:
-                    print("Step 1: Skipping BC policy training as suboptimal policy is provided")
-                    step_results["bc"] = None
-                else:
-                    print("Step 1: Training BC policy from demonstrations...")
-                    bc_stats = ntril_trainer._train_bc_policy(
-                        force_retrain="bc" in _force_set,
-                        n_epochs=bc_epochs, progress_bar=True,
-                    )
-                    step_results["bc"] = bc_stats
-                    print("\nBC Training Stats:")
-                    for key, value in bc_stats.items():
-                        print(f"  {key}: {value}")
-
-            elif step_num == 2: # Generates noisy rollouts from BC policy
-                if suboptimal_policy is None:
-                    raise ValueError("Suboptimal policy is required for step 2")
-                print("Step 2: Generating noisy rollouts...")
-                _, rollout_stats = ntril_trainer._generate_noisy_rollouts(
-                    force_retrain="rollouts" in _force_set
-                )
-                step_results["rollouts"] = rollout_stats
-                print(
-                    f"\nGenerated rollouts for {len(ntril_trainer.noise_levels)} noise levels"
-                )
-
-            elif step_num == 3: # Applies robust tube MPC to augment data
-                if robust_mpc is None:
-                    raise ValueError("Robust MPC is required for step 3")
-                noisy_rollouts_path = os.path.join(save_dir, "noisy_rollouts.pkl")
-                if os.path.exists(noisy_rollouts_path):
-                    with open(noisy_rollouts_path, "rb") as f:
-                        noisy_rollouts = pickle.load(f)
-                else:
-                    raise ValueError(f"Noisy rollouts not found at {noisy_rollouts_path}")
-                ntril_trainer.noisy_rollouts = noisy_rollouts
-                print("Step 3: Augmenting data with robust tube MPC...")
-                augmentation_data, rtmpc_trajectories = ntril_trainer._augment_data_with_mpc(
-                    force_retrain="mpc" in _force_set
-                )
-                step_results["augmentation"] = augmentation_data
-                step_results["rtmpc_trajectories"] = rtmpc_trajectories
-                print("\nData augmentation complete")
-
-            elif step_num == 4: # Builds ranked dataset
-                print("Step 4: Building ranked dataset...")
-                ranking_stats = ntril_trainer._build_ranked_dataset(
-                    force_retrain="ranking" in _force_set
-                )
-                step_results["ranking"] = ranking_stats
-                print("\nRanked dataset built")
-
-            elif step_num == 5: # Trains reward network using demonstration ranked IRL
-                print("Step 5: Training reward network with demonstration ranked IRL...")
-                irl_stats = ntril_trainer._train_reward_network(
-                    force_retrain="irl" in _force_set,
-                    **(irl_train_kwargs or {}),
-                )
-                step_results["irl"] = irl_stats
-                print("\nIRL training complete")
-
-            elif step_num == 6: # Trains final policy using learned reward
-                print("Step 6: Training final policy using learned reward...")
-                rl_stats = ntril_trainer._train_final_policy(
-                    total_timesteps=rl_total_timesteps,
-                    force_retrain="rl" in _force_set,
-                    **(rl_train_kwargs or {}),
-                )
-                step_results["rl"] = rl_stats
-                print("\nFinal policy training complete")
-
+        if step_num == 1: # Trains BC policy from suboptimal expert demonstrations
+            if suboptimal_policy:
+                print("Step 1: Skipping BC policy training as suboptimal policy is provided")
+                step_results["bc"] = None
             else:
-                raise ValueError(f"Invalid step number: {step_num}. Must be 1-6.")
+                print("Step 1: Training BC policy from demonstrations...")
+                bc_stats = ntril_trainer._train_bc_policy(
+                    force_retrain="bc" in _force_set,
+                    n_epochs=bc_epochs, progress_bar=True,
+                )
+                step_results["bc"] = bc_stats
+                print("\nBC Training Stats:")
+                for key, value in bc_stats.items():
+                    print(f"  {key}: {value}")
+
+        elif step_num == 2: # Generates noisy rollouts from BC policy
+            if suboptimal_policy is None:
+                raise ValueError("Suboptimal policy is required for step 2")
+            print("Step 2: Generating noisy rollouts...")
+            _, rollout_stats = ntril_trainer._generate_noisy_rollouts(
+                force_retrain="rollouts" in _force_set
+            )
+            step_results["rollouts"] = rollout_stats
+            print(
+                f"\nGenerated rollouts for {len(ntril_trainer.noise_levels)} noise levels"
+            )
+
+        elif step_num == 3: # Applies robust tube MPC to augment data
+            if robust_mpc is None:
+                raise ValueError("Robust MPC is required for step 3")
+            noisy_rollouts_path = os.path.join(save_dir, "noisy_rollouts.pkl")
+            if os.path.exists(noisy_rollouts_path):
+                with open(noisy_rollouts_path, "rb") as f:
+                    noisy_rollouts = pickle.load(f)
+            else:
+                raise ValueError(f"Noisy rollouts not found at {noisy_rollouts_path}")
+            ntril_trainer.noisy_rollouts = noisy_rollouts
+            print("Step 3: Augmenting data with robust tube MPC...")
+            augmentation_data, rtmpc_trajectories = ntril_trainer._augment_data_with_mpc(
+                force_retrain="mpc" in _force_set
+            )
+            step_results["augmentation"] = augmentation_data
+            step_results["rtmpc_trajectories"] = rtmpc_trajectories
+            print("\nData augmentation complete")
+
+        elif step_num == 4: # Builds ranked dataset
+            print("Step 4: Building ranked dataset...")
+            ranking_stats = ntril_trainer._build_ranked_dataset(
+                force_retrain="ranking" in _force_set
+            )
+            step_results["ranking"] = ranking_stats
+            print("\nRanked dataset built")
+
+        elif step_num == 5: # Trains reward network using demonstration ranked IRL
+            print("Step 5: Training reward network with demonstration ranked IRL...")
+            irl_stats = ntril_trainer._train_reward_network(
+                force_retrain="irl" in _force_set,
+                **(irl_train_kwargs or {}),
+            )
+            step_results["irl"] = irl_stats
+            print("\nIRL training complete")
+
+        elif step_num == 6: # Trains final policy using learned reward
+            print("Step 6: Training final policy using learned reward...")
+            rl_stats = ntril_trainer._train_final_policy(
+                total_timesteps=rl_total_timesteps,
+                force_retrain="rl" in _force_set,
+                **(rl_train_kwargs or {}),
+            )
+            step_results["rl"] = rl_stats
+            print("\nFinal policy training complete")
+        
+        else:
+            raise ValueError(f"Invalid step number: {step_num}. Must be 1-6.")
 
         print(f"\n{'='*70}")
         print(f"Completed Steps: {run_individual_steps}")
@@ -764,8 +748,37 @@ def evaluate_policy(
     return metrics
 
 
+# CLI
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="NTRIL training for double integrator.",
+    )
+    sub = p.add_subparsers(dest="command")
+    sp = sub.add_parser("train", help="Train the NTRIL policy")
+    # sp.add_argument("--save-dir", type=str, default=str(Path(__file__).parent.resolve() / "ntril_outputs"))
+    sp.add_argument("--noise-levels", type=tuple, default=tuple(np.arange(0.0, 1.05, 0.05)))
+    sp.add_argument("--n-rollouts-per-noise", type=int, default=5)
+    sp.add_argument("--rl-total-timesteps", type=int, default=1_000_000)
+    sp.add_argument("--run-individual-steps", type=list, default=[1,2,3,4,5,6])
+    sp.add_argument("--retrain", type=list, default=None)
+    sp.add_argument("--just-plot-noisy-rollouts", type=bool, default=False)
+    sp.add_argument("--archive-name", type=str, default=str(Path(__file__).parent.resolve() / "ntril_outputs"/ "archived_runs"/ "run_v1"))
+
+    sp = sub.add_parser("plot-noisy-rollouts", help="Plot the noisy rollouts")
+    sp.add_argument("--noise-levels", type=tuple, default=tuple(np.arange(0.0, 1.05, 0.05)))
+    sp.add_argument("--n-rollouts-per-noise", type=int, default=5)
+    sp.add_argument("--rl-total-timesteps", type=int, default=1_000_000)
+    sp.add_argument("--run-individual-steps", type=list, default=None)
+    sp.add_argument("--retrain", type=list, default=None)
+    sp.add_argument("--just-plot-noisy-rollouts", type=bool, default=True)
+    sp.add_argument("--archive-name", type=str, default=str(Path(__file__).parent.resolve() / "ntril_outputs"/ "archived_runs"/ "run_v1"))
+    return p
+
+
 def main():
     """Run the complete NTRIL example."""
+    args = _build_parser().parse_args()
+
     # Configuration
     print("Generating expert demonstrations on DoubleIntegrator-v0...")
 
@@ -860,19 +873,54 @@ def main():
     K = [0.02, 0.3]
     suboptimal_policy.set_K_values(K[0], K[1])
 
-    # Step 2: Run NTRIL training (Choose step 3 to test sample augmentation)
-    ntril_trainer = run_ntril_training(
-        suboptimal_policy=suboptimal_policy,
-        env_id=env_id,
-        save_dir=str(SAVE_DIR),
-        noise_levels=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
-        n_rollouts_per_noise=10,
-        rl_total_timesteps=1_000_000,
-        run_individual_steps=[1,2,3,4,5,6],
-        retrain=["bc", "rollouts", "mpc", "ranking", "irl", "rl"],
-        just_plot_noisy_rollouts=False,
-        robust_mpc=robust_tube_mpc,
-    )
+    if args.command == "train":
+        ntril_trainer = run_ntril_training(
+            save_dir=str(SAVE_DIR),
+            suboptimal_policy=suboptimal_policy,
+            env_id=env_id,
+            noise_levels=args.noise_levels,
+            n_rollouts_per_noise=args.n_rollouts_per_noise,
+            rl_total_timesteps=args.rl_total_timesteps,
+            run_individual_steps=args.run_individual_steps,
+            retrain=args.retrain,
+            robust_mpc=robust_tube_mpc,
+        )
+        # Archive the reward-net ensemble + final policy under a human-readable name.
+        # Change `archive_name` before each run you want to preserve, then you can
+        # safely re-run with force_retrain without losing the previous results.
+        # The archive lives at: <SAVE_DIR>/archived_runs/<archive_name>/
+        archive_name = args.archive_name
+        ntril_trainer.archive_run(
+            name=archive_name,
+            archive_root=str(SAVE_DIR / "archived_runs"),
+        )
+    elif args.command == "plot-noisy-rollouts":
+        ntril_trainer = run_ntril_training(
+            save_dir=str(SAVE_DIR),
+            noise_levels=args.noise_levels,
+            n_rollouts_per_noise=args.n_rollouts_per_noise,
+            rl_total_timesteps=args.rl_total_timesteps,
+            run_individual_steps=args.run_individual_steps,
+            retrain=args.retrain,
+            just_plot_noisy_rollouts=True,
+            robust_mpc=robust_tube_mpc,
+        )
+    else:
+        ntril_trainer = run_ntril_training(
+            suboptimal_policy=suboptimal_policy,
+            env_id=env_id,
+            save_dir=str(SAVE_DIR),
+            noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+            n_rollouts_per_noise=5,
+            rl_total_timesteps=1_000_000,
+            run_individual_steps=[1,2,3,4,5,6],
+            retrain=["mpc", "ranking", "irl", "rl"],
+            just_plot_noisy_rollouts=False,
+            robust_mpc=robust_tube_mpc,
+        )
+
+
+
 
     # # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
     # mpc_plot_dir = SCRIPT_DIR / "debug" / "plots" / "mpc"

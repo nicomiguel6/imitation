@@ -706,6 +706,103 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         print(f"Final policy saved to {final_policy_path}")
         return self.final_policy
 
+    def archive_run(self, name: str, archive_root: Optional[str] = None) -> str:
+        """Persist the reward-net ensemble and the final policy under a named archive.
+
+        Creates the directory ``<archive_root>/<name>/`` and writes:
+
+        * ``reward_net_0.pth`` … ``reward_net_{n-1}.pth`` – state-dicts of every
+          network in the ensemble.
+        * ``final_policy.zip`` – the Stable-Baselines3 PPO agent.
+        * ``meta.json`` – light metadata (name, n_ensemble, save_dir, timestamp).
+
+        Args:
+            name: Human-readable identifier for this run, e.g. ``"run1_good"``.
+            archive_root: Directory that will hold all archives.  Defaults to
+                ``<save_dir>/archived_runs``.
+
+        Returns:
+            Absolute path to the created archive directory.
+        """
+        import json
+        from datetime import datetime
+
+        if archive_root is None:
+            archive_root = os.path.join(self.save_dir, "archived_runs")
+
+        dest = os.path.join(archive_root, name)
+        os.makedirs(dest, exist_ok=True)
+
+        if not self.reward_nets_ensemble:
+            raise ValueError("No reward nets to archive — run _train_reward_network() first.")
+        for i, net in enumerate(self.reward_nets_ensemble):
+            th.save(net.state_dict(), os.path.join(dest, f"reward_net_{i}.pth"))
+
+        if self.final_policy is None:
+            raise ValueError("No final policy to archive — run _train_final_policy() first.")
+        self.final_policy.save(os.path.join(dest, "final_policy"))
+
+        meta = {
+            "name": name,
+            "n_ensemble": len(self.reward_nets_ensemble),
+            "save_dir": str(self.save_dir),
+            "archived_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        with open(os.path.join(dest, "meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+
+        print(f"Run archived to: {dest}")
+        return dest
+
+    @classmethod
+    def load_archived_run(
+        cls,
+        archive_path: str,
+        venv: "vec_env.VecEnv",
+        device: str = "cpu",
+    ):
+        """Reload the reward-net ensemble and final policy from an archive.
+
+        Args:
+            archive_path: Path to the archive directory created by :meth:`archive_run`.
+            venv: A ``VecEnv`` whose observation/action spaces match the original run.
+            device: Torch device to load networks onto (``"cpu"`` or ``"cuda"``).
+
+        Returns:
+            Tuple ``(reward_nets, final_policy)`` where *reward_nets* is a list of
+            :class:`TrajectoryRewardNet` instances and *final_policy* is a
+            :class:`~stable_baselines3.PPO` agent.
+        """
+        import json
+
+        meta_path = os.path.join(archive_path, "meta.json")
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        n_ensemble = meta["n_ensemble"]
+        reward_nets = []
+        for i in range(n_ensemble):
+            net = TrajectoryRewardNet(
+                observation_space=venv.observation_space,
+                action_space=venv.action_space,
+                use_state=True,
+                use_action=False,
+                use_next_state=False,
+                use_done=False,
+                hid_sizes=(256, 256),
+            )
+            state_dict = th.load(
+                os.path.join(archive_path, f"reward_net_{i}.pth"),
+                map_location=device,
+            )
+            net.load_state_dict(state_dict)
+            net.to(device)
+            reward_nets.append(net)
+
+        final_policy = PPO.load(os.path.join(archive_path, "final_policy"))
+
+        return reward_nets, final_policy
+
     def _make_reward_net(self) -> TrajectoryRewardNet:
         """Construct a fresh reward network with the standard architecture."""
         return TrajectoryRewardNet(

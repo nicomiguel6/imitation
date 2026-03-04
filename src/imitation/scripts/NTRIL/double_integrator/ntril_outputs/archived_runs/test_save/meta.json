@@ -1,0 +1,6 @@
+{
+  "name": "test_save",
+  "n_ensemble": 3,
+  "save_dir": "/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs",
+  "archived_at": "2026-03-03T13:13:43"
+}

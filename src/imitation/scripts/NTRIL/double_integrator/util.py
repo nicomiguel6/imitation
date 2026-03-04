@@ -477,7 +477,7 @@ def measure_ranking_separability(
 
     
     # define reward function using MPC cost
-    Q = np.diag([1000.0, 0.0])
+    Q = np.diag([1.0, 0.0])
     R = 0.01 * np.eye(1)
     def reward_function(states):
         reward_tmp = []

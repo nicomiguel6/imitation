@@ -41,14 +41,15 @@ class DoubleIntegratorEnv(gym.Env):
         dt: float = 1.0,
         max_position: float = 50.0,
         max_velocity: float = 50.0,
-        max_acceleration: float = 20.0,
+        max_acceleration: float = 2.0,
         target_position: float = 0.0,
         position_tolerance: float = 0.1,
         velocity_tolerance: float = 0.1,
-        position_cost_weight: float = 10.0,
+        position_cost_weight: float = 1.0,
         velocity_cost_weight: float = 1.0,
         control_cost_weight: float = 0.1,
         max_episode_steps: int = 200,
+        disturbance_magnitude: float = 0.0,
     ):
         """Initialize the double integrator environment.
 
@@ -78,7 +79,7 @@ class DoubleIntegratorEnv(gym.Env):
         self.velocity_cost_weight = velocity_cost_weight
         self.control_cost_weight = control_cost_weight
         self.max_episode_steps = max_episode_steps
-
+        self.disturbance_magnitude = disturbance_magnitude
         # Observation space: [position, velocity]
         self.observation_space = Box(
             low=np.array(
@@ -158,7 +159,11 @@ class DoubleIntegratorEnv(gym.Env):
         action = np.asarray(action, dtype=np.float32).reshape(1,)
         action = np.clip(action, -self.max_acceleration, self.max_acceleration)
 
-        xdot = self.A @ self.state + self.B @ action
+        disturbance = np.random.uniform(-1.0, 1.0, size=self.state.shape)
+        disturbance = disturbance / np.linalg.norm(disturbance)
+        disturbance = disturbance * self.disturbance_magnitude
+
+        xdot = self.A @ self.state + self.B @ action + disturbance
         self.state = self.state + xdot * self.dt
         
         position = self.state[0]

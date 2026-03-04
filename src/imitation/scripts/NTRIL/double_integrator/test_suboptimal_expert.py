@@ -16,8 +16,9 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 
 
 def main():
-    env_policy = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
-    env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
+    env_policy = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", disturbance_magnitude=0.1)
+    env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", disturbance_magnitude=0.1)
+    env_suboptimal = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", disturbance_magnitude=0.1)
 
     # load final policy
     final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
@@ -44,10 +45,11 @@ def main():
         time_step=1.0,
         A=np.array([[0.0, 1.0], [0.0, 0.0]]),
         B=np.array([[0.0], [1.0]]),
-        Q=np.diag([1.0, 1.0]),
-        R=0.1 * np.eye(1),
+        Q=np.diag([100.0, 1.0]),
+        R=0.01 * np.eye(1),
         state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
         control_bounds=(np.array([-2.0]), np.array([2.0])),
+        disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
     )
     mpc_policy.setup()
 
@@ -57,41 +59,49 @@ def main():
     for j in range(1):
         obs, info = env_policy.reset()
         obs_mpc, info = env_mpc.reset(state=obs)
+        obs_suboptimal, info = env_suboptimal.reset(state=obs)
         states_policy = [obs.copy()]
         states_mpc = [obs.copy()]
+        states_suboptimal = [obs_suboptimal.copy()]
         actions_policy = []
         actions_mpc = []
+        actions_suboptimal = []
         rewards_policy = []
         rewards_mpc = []
-
+        rewards_suboptimal = []
         for i in range(env_policy.unwrapped.max_episode_steps):
-            # action_policy = suboptimal_policy._choose_action(obs)
+            action_suboptimal = suboptimal_policy._choose_action(obs_suboptimal)
             action_policy, _ = final_policy.predict(obs)
             _, action_mpc = mpc_policy.solve_mpc(obs_mpc)
             obs, reward, terminated, truncated, info = env_policy.step(action_policy)
             obs_mpc, reward_mpc, terminated_mpc, truncated_mpc, info_mpc = env_mpc.step(action_mpc)
+            obs_suboptimal, reward_suboptimal, terminated_suboptimal, truncated_suboptimal, info_suboptimal = env_suboptimal.step(action_suboptimal)
             states_policy.append(obs)
             states_mpc.append(obs_mpc)
+            states_suboptimal.append(obs_suboptimal)
             actions_policy.append(action_policy)
             actions_mpc.append(action_mpc)
+            actions_suboptimal.append(action_suboptimal)
             rewards_policy.append(reward)
             rewards_mpc.append(reward_mpc)
+            rewards_suboptimal.append(reward_suboptimal)
             if terminated or truncated:
                 break
 
         fig, ax = plt.subplots()
         ax.plot(np.array(states_policy)[:, 0], "k-", label="Final Policy Trajectory")
         ax.plot(np.array(states_mpc)[:, 0], "r-", label="MPC Trajectory")
+        ax.plot(np.array(states_suboptimal)[:, 0], "b-", label="Suboptimal Policy Trajectory")
         ax.set_xlabel("Time")
         ax.set_ylabel("Position")
-        ax.set_title("Trajectory Comparison of Final Policy and MPC")
+        ax.set_title("Final Policy, MPC, and Suboptimal Policy in Noisy Environment")
         ax.legend()
-        fig.savefig(SCRIPT_DIR / f"trajectory_comparison_{j}.png")
+        fig.savefig(SCRIPT_DIR / f"trajectory_comparison_noisy_{j}.png")
         plt.close()
 
         print("Total final policy cost: ", sum(rewards_policy))
         print("Total MPC cost: ", sum(rewards_mpc))
-
+        print("Total suboptimal policy cost: ", sum(rewards_suboptimal))
 
 if __name__ == "__main__":
     main()
