@@ -105,6 +105,18 @@ class RobustTubeMPC:
         self.xs = []
         self.us = []
 
+        # Tracks the number of solve_mpc() calls since the last reset_episode().
+        # Used to force-sync mpc.t0 and simulator.t0 before every solve, making
+        # time consistent with env.step_count regardless of what ran before.
+        self._episode_step: int = 0
+
+        # Nominal state z tracked separately from the true state x.
+        # The MPC always solves from z (not x), so the predicted nominal
+        # trajectory is undisturbed.  The ancillary control K@(x - z) then
+        # drives the true state back toward z, keeping the error e = x - z in Z.
+        # Initialised to None; set to the initial physical state in reset_episode().
+        self._z_nominal: Optional[np.ndarray] = None
+
         if reference_trajectory is None: # default to all zeros if none is provided, this changes the cost function to a minimization problem instead of tracking problem
             self.reference_trajectory = types.Trajectory(obs=np.zeros((self.episode_length + 1, self.state_dim)), acts=np.zeros((self.episode_length, self.action_dim)), infos=np.array([{}] * self.episode_length), terminal=True)
         else:
@@ -115,7 +127,7 @@ class RobustTubeMPC:
 
         # ------------ UNDISTURBED MODEL SETUP ------------- #
         # for use in generating nominal control
-        model_type = "continuous"
+        model_type = "discrete"
         nominal_model = do_mpc.model.LinearModel(model_type)
 
         _x = nominal_model.set_variable(
@@ -140,11 +152,11 @@ class RobustTubeMPC:
         # ------------ PRELIMINARY SETS ------------- #
 
         # convert A and B to discrete time
-        disc_model = nominal_model.discretize(t_step=self.time_step)
-        self.A_d = disc_model._A
-        self.B_d = disc_model._B
-        # self.A_d = self.A
-        # self.B_d = self.B
+        # disc_model = nominal_model.discretize(t_step=self.time_step)
+        # self.A_d = disc_model._A
+        # self.B_d = disc_model._B
+        self.A_d = self.A
+        self.B_d = self.B
 
         # Solve for P, K matrices
         self.P = solve_discrete_are(self.A_d, self.B_d, self.Q, self.R)
@@ -190,21 +202,21 @@ class RobustTubeMPC:
         # ------------ CONTROLLER SETUP ------------- #
         # solver for nominal control
         mpc = do_mpc.controller.MPC(nominal_model)
-        setup_mpc = {
-            "n_horizon": self.horizon,
-            "t_step": self.time_step,
-            "state_discretization": "collocation",
-            "collocation_type": "radau",
-            "collocation_deg": 3,
-            "collocation_ni": 1,
-            "store_full_solution": True,
-        }
         # setup_mpc = {
-        #     'n_horizon': self.horizon,
-        #     't_step': self.time_step,
-        #     'state_discretization': 'discrete',
-        #     'store_full_solution': True,
+        #     "n_horizon": self.horizon,
+        #     "t_step": self.time_step,
+        #     "state_discretization": "collocation",
+        #     "collocation_type": "radau",
+        #     "collocation_deg": 3,
+        #     "collocation_ni": 2,
+        #     "store_full_solution": True,
         # }
+        setup_mpc = {
+            'n_horizon': self.horizon,
+            't_step': self.time_step,
+            # 'state_discretization': 'discrete',
+            'store_full_solution': True,
+        }
         mpc.set_param(**setup_mpc)
 
 
@@ -299,9 +311,11 @@ class RobustTubeMPC:
                 return d_template
 
             self.simulator.set_p_fun(d_fun)
+            self.estimator = do_mpc.estimator.StateFeedback(disturbed_model)
         
         else:
             self.simulator = do_mpc.simulator.Simulator(nominal_model)
+            self.estimator = do_mpc.estimator.StateFeedback(nominal_model)
 
             sim_tvp_template = self.simulator.get_tvp_template()
 
@@ -344,7 +358,8 @@ class RobustTubeMPC:
             reference_trajectory: New reference trajectory to track.
         """
         self.reference_trajectory = reference_trajectory
-        # Reset internal time so t_idx starts at 0 for the new trajectory.
+        self._episode_step = 0
+        self._z_nominal = None  # cleared; reset_episode() must be called next
         if self.mpc is not None:
             self.mpc.reset_history()
             self.mpc.t0 = 0.0
@@ -354,6 +369,88 @@ class RobustTubeMPC:
         self.xs = []
         self.us = []
 
+    def reset_episode(
+        self,
+        initial_state: np.ndarray,
+        t_start: float = 0.0,
+    ) -> None:
+        """Reset MPC and simulator for a new episode (or after a time jump).
+
+        Must be called:
+        - At the start of every gymnasium episode, before the first solve_mpc().
+        - After set_reference_trajectory(), once the initial state is known.
+        - When resuming mid-trajectory: pass t_start = env.step_count * time_step.
+
+        This is the *only* place set_initial_guess() is called.  All subsequent
+        solve_mpc() calls warm-start from the previous step's NLP solution.
+
+        Args:
+            initial_state: Initial physical state (or augmented obs — the physical
+                           slice is extracted automatically).
+            t_start: Starting time in seconds.  Default 0.0 for a fresh episode.
+                     Pass env.step_count * time_step to resume mid-trajectory.
+        """
+        phys = np.asarray(initial_state).flatten()[:self.state_dim].reshape(-1, 1)
+        self._episode_step = int(round(t_start / self.time_step))
+
+        if self.mpc is not None:
+            self.mpc.reset_history()
+            self.mpc.t0 = t_start
+            self.mpc.x0 = phys
+            self.mpc.set_initial_guess()
+
+        if self.simulator is not None:
+            self.simulator.reset_history()
+            self.simulator.t0 = t_start
+            self.simulator.x0 = phys
+
+        if hasattr(self, "estimator") and self.estimator is not None:
+            self.estimator.x0 = phys
+
+        # At episode start the nominal trajectory begins at the true state,
+        # so the initial error e_0 = x_0 - z_0 = 0.
+        self._z_nominal = phys.flatten().copy()
+
+        self.xs = []
+        self.us = []
+
+    def solve_to_end(self, initial_state:np.ndarray, n_steps:int) -> Tuple[np.ndarray, np.ndarray]:
+        """Solve the MPC problem to the end of the horizon.
+
+        Args:
+            initial_state: Initial state of the system.
+            n_steps: Number of steps to solve the MPC problem.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: Tuple of (next_state, applied_control).
+        """
+
+        self.mpc.reset_history()
+        self.mpc.t0 = 0.0
+        self.simulator.t0 = 0.0
+        self._episode_step = 0
+
+        self.mpc.x0 = initial_state
+        self.estimator.x0 = initial_state
+        self.simulator.x0 = initial_state
+        self.mpc.set_initial_guess()
+
+        x0 = initial_state
+        xs = [x0]
+        us = []
+        for i in range(n_steps):
+            u0 = self.mpc.make_step(x0)
+            nominal_state = self.mpc.data.prediction(("_x", "x"))
+            y0 = self.simulator.make_step(u0)
+            x0 = self.estimator.make_step(y0)
+            xs.append(x0.flatten())
+            us.append(u0.flatten())
+        
+        x_actual = self.mpc.data["_x"]
+        u_actual = self.mpc.data["_u"]
+        
+        return xs, us, x_actual, u_actual
+    
     def solve_mpc(
         self, state: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -367,41 +464,62 @@ class RobustTubeMPC:
         """
         if self.mpc is None or self.simulator is None:
             raise ValueError(
-                "Must set MPC and Simulator objects before attempting to solve"
+                "Must call setup() and reset_episode() before solve_mpc()."
+            )
+        if self._z_nominal is None:
+            raise ValueError(
+                "reset_episode() must be called before the first solve_mpc()."
             )
 
-        if state.shape[0] > self.state_dim:
-            state = self._extract_physical_state(state)
-        else:
-            state = state.reshape(-1, 1)
+        # ---- extract physical state (strip reference augmentation if present) ----
+        x_true = np.asarray(self._extract_physical_state(state) if state.shape[0] > self.state_dim
+                            else state).reshape(-1, 1)
 
-        # Set initial state for MPC and simulator
-        self.mpc.x0 = state
-        self.simulator.x0 = state
-        self.mpc.set_initial_guess()
+        # ---- force-sync times (Fix 2) ----------------------------------------
+        # Keeps t_idx in tvp_fun aligned with env.step_count and corrects any
+        # drift from augment_trajectory() calls between solves.
+        t_now = self._episode_step * self.time_step
+        self.mpc.t0 = t_now
+        self.simulator.t0 = t_now
 
-        # Compute nominal optimal control from MPC
-        u_nom = self.mpc.make_step(state)
-        
-        # Predict nominal state (first predicted state in the horizon)
-        nominal_state = self.mpc.data.prediction(("_x", "x"))[:, 0]
+        # ---- nominal state (Fix 4) -------------------------------------------
+        # The MPC solves from z_nominal, NOT from x_true.  Because z propagates
+        # under undisturbed dynamics, the predicted trajectory stays inside the
+        # tightened constraints.  If we used x_true here the "nominal" would equal
+        # the true state and the ancillary correction would always be zero.
+        z = self._z_nominal.reshape(-1, 1)
 
-        # Convert to column vectors for disturbance rejection control law
-        state_col = np.asarray(state).reshape(-1, 1)
-        nominal_col = np.asarray(nominal_state).reshape(-1, 1)
+        self.mpc.x0 = z
+        self.simulator.x0 = x_true
+        # set_initial_guess() is NOT called here (Fix 3): warm-start from the
+        # previous step's NLP solution (initialised once in reset_episode()).
 
+        # ---- solve MPC from nominal state ------------------------------------
+        u_nom = self.mpc.make_step(z)
+
+        # ---- ancillary correction u = u_nom + K(x_true - z) -----------------
+        # Non-zero whenever disturbances have pushed x_true away from z.
+        # K is the LQR gain for the closed-loop A_k = A_d + B_d K, which is
+        # stable and keeps e = x_true - z inside the MRPI set Z.
         if self.disturbance_bound is not None:
-            applied_u = u_nom + self.K @ (state_col - nominal_col)
+            applied_u = u_nom + self.K @ (x_true - z)
         else:
             applied_u = u_nom
 
-        # Simulate the next state using the simulator
+        # ---- propagate nominal state under undisturbed dynamics --------------
+        # z_{t+1} = A_d z_t + B_d u_nom  (no disturbance term)
+        self._z_nominal = (self.A_d @ z + self.B_d @ u_nom).flatten()
+
+        # ---- simulate next true state (do-mpc internal simulator) -----------
         next_state = self.simulator.make_step(u0=applied_u)
 
-        self.xs.append(state)
+        # ---- bookkeeping ----
+        nominal_horizon = self.mpc.data.prediction(("_x", "x"))
+        self._episode_step += 1
+        self.xs.append(x_true)
         self.us.append(applied_u)
 
-        return next_state, applied_u.flatten()
+        return next_state, applied_u.flatten(), nominal_horizon
 
     def augment_trajectory(
         self,
@@ -423,8 +541,14 @@ class RobustTubeMPC:
         """
 
         augmented_infos = []
-
         augmented_trajs = []
+
+        # Snapshot the simulator's time before augmentation so we can restore it
+        # afterward.  augment_trajectory() calls simulator.make_step() many times,
+        # which advances simulator.t0.  Restoring here means the method is
+        # non-destructive to the episode state: a subsequent solve_mpc() call will
+        # still see the correct t_now without relying on _episode_step to override it.
+        _saved_sim_t0 = float(self.simulator.t0)
 
         for t in range(len(trajectory.obs) - 1):
             if t % k_timesteps == 0 and t + partial_horizon < len(trajectory.obs):
@@ -442,8 +566,15 @@ class RobustTubeMPC:
                 approx_tube = get_approximate_tube(tube_set)
                 samples = get_samples(approx_tube, corners=False)
 
-                # simulate partial trajectory for each samples (should be cheap as it's only propagating dynamics)
+                # Simulate a partial trajectory for each sample.
+                # The simulator's t0 is reset to t * time_step at the start of each
+                # sample so every sample in the same outer iteration starts from the
+                # same reference-trajectory index.
                 for sample in samples:
+
+                    # Reset simulator time to the nominal time of this outer step
+                    # so the TVP (reference look-up) is consistent across samples.
+                    self.simulator.t0 = t * self.time_step
 
                     # initialize trajectory builder
                     builder = util.TrajectoryBuilder()
@@ -500,6 +631,9 @@ class RobustTubeMPC:
                     )
 
                 augmented_trajs.extend(augmented_trajs_t)
+
+        # Restore simulator time so this call is non-destructive to episode state.
+        self.simulator.t0 = _saved_sim_t0
 
         return augmented_trajs
 
@@ -715,11 +849,11 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
     # Propagate trajectories forward
     for traj_idx in range(n_trajectories):
         # Set up zero initial state
-        initial_state = np.random.uniform(-0.1, 0.1, size=(internal_state_dim,)).astype(float)
+        initial_state = np.array([0.0, 0.0]).reshape(-1, 1)
         trajectories[traj_idx].append(initial_state)
         
         # set initial state to zero
-        obs, info = env.reset(state=initial_state)
+        obs, info = env.reset(state=initial_state.flatten())
         obs = obs[:internal_state_dim]
         for _ in range(total_time_steps):
             disturbance = np.random.uniform(-disturbance_magnitude, disturbance_magnitude, size=(internal_state_dim,))
@@ -1091,52 +1225,124 @@ if __name__ == "__main__": # test code
     import matplotlib.pyplot as plt
 
     disturbance_magnitude = 0.1
-    disturbance_vertices = np.array([[-disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude]])
+    disturbance_vertices = np.array([[disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, -disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude], [disturbance_magnitude, -disturbance_magnitude]])
     
     dt = 0.1
     # Set up double integrator environment
-    env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=20.0, dt = dt)
+    env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=40.0, dt = dt, disturbance_magnitude=disturbance_magnitude)
     # Set up reference trajectory
-    reference_trajectory = generate_reference_trajectory(T=env.max_episode_steps+1, dt=dt, mode="constant", target_position=0.0)
+    reference_trajectory = generate_reference_trajectory(T=env.max_episode_steps+1, dt=dt, mode="sinusoidal", amplitude=20.0, frequency=0.05, phase=0.0)
     reference_trajectory_mpc = types.Trajectory(obs=reference_trajectory, acts=np.zeros((env.max_episode_steps, 1)), infos=np.array([{}] * env.max_episode_steps), terminal=True)
 
-    # Set up robust tube MPC
+    # Set up robust tube MPC for env usage
     robust_mpc = RobustTubeMPC(
-        horizon = 20,
+        horizon = 40,
         time_step = dt,
-        A = np.array([[0.0, 1.0], [0.0, 0.0]]),
-        B = np.array([[0.0], [1.0]]),
-        Q = np.diag([10.0, 1.0]),
-        R = 0.01*np.eye(1),
-        # disturbance_vertices = disturbance_vertices,
+        A = env.A_d,
+        B = env.B_d,
+        Q = np.diag([1.0, 1.0]),
+        R = 0.1*np.eye(1),
+        disturbance_bound = disturbance_magnitude,
+        disturbance_vertices = disturbance_vertices,
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-2.0]), np.array([2.0])),
-        # reference_trajectory = reference_trajectory_mpc,
+        control_bounds = (np.array([-50.0]), np.array([50.0])),
+        reference_trajectory = reference_trajectory_mpc,
+    )
+
+    # set up identical robust tube MPC for internal usage
+    robust_mpc_internal = RobustTubeMPC(
+        horizon = 40,
+        time_step = dt,
+        A = env.A_d,
+        B = env.B_d,
+        Q = np.diag([1.0, 1.0]),
+        R = 0.1*np.eye(1),
+        disturbance_bound = disturbance_magnitude,
+        disturbance_vertices = disturbance_vertices,
+        state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
+        control_bounds = (np.array([-50.0]), np.array([50.0])),
+        reference_trajectory = reference_trajectory_mpc,
     )
 
     robust_mpc.setup()
+    robust_mpc_internal.setup()
 
     # Compute approximate linear mRPI set
-    approximate_linear_mrpi = compute_approximate_linear_mrpi(robust_mpc, disturbance_magnitude=disturbance_magnitude)
-    print(approximate_linear_mrpi)
+    # approximate_linear_mrpi = compute_approximate_linear_mrpi(robust_mpc, disturbance_magnitude=disturbance_magnitude)
 
     # Run MPC for 100 steps and plot
-    obs, info = env.reset(options={"reference_trajectory": reference_trajectory})
+    initial_state = np.array([0.0, 0.0], dtype=np.float32)
+    obs, info = env.reset(
+        state=initial_state,
+        options={"reference_trajectory": reference_trajectory},
+    )
+
+    robust_mpc.set_reference_trajectory(reference_trajectory_mpc)
+    robust_mpc_internal.set_reference_trajectory(reference_trajectory_mpc)
+
+    # check initial observation is in tightened state bounds
+    # tightened_set = pytope.Polytope(A=robust_mpc.A_x_t, b=robust_mpc.b_x_t)
+    # while not tightened_set.contains(obs[:robust_mpc.state_dim]):
+    #     obs, info = env.reset(options={"reference_trajectory": reference_trajectory})
+
     states = []
     actions = []
+    nominal_states_trajectories = []
+
+    # --- Option A: gymnasium loop (env drives the dynamics) ---
+    # reset_episode() must be called once before the first solve_mpc() to
+    # initialise the solver, set t0 = 0 on both MPC and simulator, and record
+    # the initial_guess.  Subsequent solve_mpc() calls warm-start from here.
+    robust_mpc.reset_episode(obs[:robust_mpc.state_dim])
     for _ in range(env.max_episode_steps):
-        nnn, action = robust_mpc.solve_mpc(obs)
+        next_state, action, nominal_state = robust_mpc.solve_mpc(obs)
+        # compare env time with mpc time
+        # print(f"env time: {env.step_count * env.dt}, mpc time: {robust_mpc.mpc.t0}")
         action = action.flatten()
         obs, reward, terminated, truncated, info = env.step(action)
         states.append(obs)
         actions.append(action)
+        nominal_states_trajectories.append(nominal_state)
 
-    # Plot states and actions
-    plt.plot(np.array(states)[:, 0], label="Position")
-    plt.plot(np.array(states)[:, 1], label="Velocity")
-    plt.plot(np.array(actions)[:, 0], label="Action")
-    plt.plot(reference_trajectory[:, 0], label="Reference Position")
-    plt.plot(reference_trajectory[:, 1], label="Reference Velocity")    
+    # --- Option B: internal loop (do-mpc simulator drives the dynamics) ---
+    xs, us, x_actual, u_actual = robust_mpc_internal.solve_to_end(initial_state, env.max_episode_steps)
+    states_internal = xs
+    actions_internal = us
+
+    # # Test env step()
+    # for itr in range(env.max_episode_steps):
+    #     action = actions_internal[itr]
+    #     obs, reward, terminated, truncated, info = env.step(action)
+    #     states.append(obs)
+    #     actions.append(action)
+
+    # Plot states and controls in separate subplots
+    fig, axs = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+    # Plot state trajectories (position and velocity)
+    axs[0].plot(np.array(states)[:, 0], 'r', label="Position (env)")
+    axs[0].plot(np.array(states)[:, 1], 'b', label="Velocity (env)")
+    axs[0].plot(np.array(states_internal)[:, 0], color="#FF7F7F", label="Position (internal)")
+    axs[0].plot(np.array(states_internal)[:, 1], color="#7FBFFF", label="Velocity (internal)")
+    axs[0].plot(reference_trajectory[:, 0], 'r-.', label="Reference Position")
+    axs[0].plot(reference_trajectory[:, 1], 'b-.', label="Reference Velocity")
+    axs[0].axhline(y=-10.0, color="k", linestyle="--", linewidth=1)
+    axs[0].axhline(y=10.0, color="k", linestyle="--", linewidth=1)
+    axs[0].set_ylabel("State")
+    axs[0].set_title("State Trajectories")
+    axs[0].legend(loc="best")
+
+    # Plot control action
+    axs[1].plot(np.arange(len(actions)), np.array(actions)[:, 0], 'g', label="Control (env)")
+    axs[1].plot(np.arange(len(actions_internal)), np.array(actions_internal)[:, 0], 'k', label="Control (internal)")
+    axs[1].axhline(y=-5.0, color="k", linestyle="--", linewidth=1)
+    axs[1].axhline(y=5.0, color="k", linestyle="--", linewidth=1)
+    axs[1].set_xlabel("Time step")
+    axs[1].set_ylabel("Control")
+    axs[1].set_title("Control Action")
+    axs[1].legend(loc="best")
+
+    plt.tight_layout()
     plt.legend()
     plt.show()
 

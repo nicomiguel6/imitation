@@ -16,6 +16,7 @@ import gymnasium as gym
 from gymnasium.spaces import Box
 from imitation.policies.base import NonTrainablePolicy
 from scipy.linalg import solve_discrete_are
+from scipy.signal import cont2discrete
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +191,7 @@ class DoubleIntegratorEnv(gym.Env):
         dt: float = 1.0,
         max_position: float = 50.0,
         max_velocity: float = 50.0,
-        max_acceleration: float = 20.0,
+        max_acceleration: float = 50.0,
         target_position: float = 0.0,
         position_tolerance: float = 0.1,
         velocity_tolerance: float = 0.1,
@@ -258,14 +259,29 @@ class DoubleIntegratorEnv(gym.Env):
         self.state: Optional[np.ndarray] = None
         self.step_count: int = 0
 
-        # Dynamics matrices
-        self.A = np.array([[0.0, 1.0], [0.0, 0.0]])
-        self.B = np.array([[0.0], [1.0]])
+        # Continuous-time dynamics matrices (ẋ = A_c x + B_c u)
+        self.A_c = np.array([[0.0, 1.0], [0.0, 0.0]])
+        self.B_c = np.array([[0.0], [1.0]])
 
-        # Cost matrices (used for terminal cost via DARE)
+        # Discrete-time matrices via ZOH — identical method to do-mpc's
+        # LinearModel.discretize(), which calls scipy.signal.cont2discrete(method='zoh').
+        # For the double integrator (A_c^2 = 0):
+        #   A_d = [[1, dt], [0, 1]]
+        #   B_d = [[dt^2/2], [dt]]
+        n_x, n_u = self.A_c.shape[0], self.B_c.shape[1]
+        A_d, B_d, _, _, _ = cont2discrete(
+            (self.A_c, self.B_c, np.eye(n_x), np.zeros((n_x, n_u))),
+            dt,
+            method="zoh",
+        )
+        self.A_d = A_d
+        self.B_d = B_d
+
+        # Cost matrices (used for terminal cost via DARE).
+        # DARE requires discrete-time A_d, B_d — not the continuous A_c, B_c.
         self.Q = np.diag([position_cost_weight, velocity_cost_weight])
         self.R = np.diag([control_cost_weight])
-        self.P = solve_discrete_are(self.A, self.B, self.Q, self.R)
+        self.P = solve_discrete_are(self.A_d, self.B_d, self.Q, self.R)
 
         # Reference trajectory: shape (T, 2), set at reset() time.
         self._ref_traj: Optional[np.ndarray] = None
@@ -357,12 +373,24 @@ class DoubleIntegratorEnv(gym.Env):
         action = np.asarray(action, dtype=np.float32).reshape(1,)
         action = np.clip(action, -self.max_acceleration, self.max_acceleration)
 
-        disturbance = np.random.uniform(-1.0, 1.0, size=self.state.shape)
-        disturbance = disturbance / np.linalg.norm(disturbance)
-        disturbance = disturbance * self.disturbance_magnitude
+        # ZOH discrete step: x_{k+1} = A_d x_k + B_d u_k
+        # Matches exactly the model do-mpc's LinearModel.discretize() produces,
+        # so MPC predictions and environment trajectories share the same model.
+        new_state = (
+            self.A_d @ self.state.reshape(-1, 1) + self.B_d @ action.reshape(-1, 1)
+        ).flatten()
 
-        xdot = self.A @ self.state + self.B @ action + disturbance
-        self.state = self.state + xdot * self.dt
+        # Additive discrete-time disturbance w_k, ||w_k|| <= disturbance_magnitude.
+        # Added directly to the state (not through ẋ*dt) so the magnitude is
+        # consistent with how compute_approximate_linear_mrpi samples disturbances.
+        if self.disturbance_magnitude > 0.0:
+            direction = np.random.uniform(-1.0, 1.0, size=self.state.shape)
+            norm = np.linalg.norm(direction)
+            if norm > 0.0:
+                direction = direction / norm
+            new_state = new_state + direction * self.disturbance_magnitude
+
+        self.state = new_state
 
         position = self.state[0]
         velocity = self.state[1]
@@ -376,10 +404,10 @@ class DoubleIntegratorEnv(gym.Env):
             position = self.max_position
         if position < -self.max_position:
             position = -self.max_position
-        if position == -self.max_position and velocity < 0:
-            velocity = 0
-        if position == self.max_position and velocity > 0:
-            velocity = 0
+        # if position == -self.max_position and velocity < 0:
+        #     velocity = 0
+        # if position == self.max_position and velocity > 0:
+        #     velocity = 0
 
         self.state = np.array([position, velocity], dtype=np.float32)
         self.step_count += 1
@@ -493,7 +521,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     # Test the reference trajectory generator
-    ref_traj = generate_reference_trajectory(T=200, dt=1.0, mode="constant", target_position=0.0)
+    ref_traj = generate_reference_trajectory(T=200, dt=1.0, mode="sinusoidal", amplitude=1.0, frequency=0.1, phase=0.0)
     print(ref_traj)
     plt.plot(ref_traj[:, 0], label="Position")
     plt.plot(ref_traj[:, 1], label="Velocity")
