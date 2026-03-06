@@ -384,6 +384,7 @@ def generate_trajectories(
     venv: VecEnv,
     sample_until: GenTrajTerminationFn,
     rng: np.random.Generator,
+    reference_trajectory: Optional[np.ndarray] = None,
     *,
     deterministic_policy: bool = False,
     label_info: Optional[Dict[str, any]] = None,
@@ -726,6 +727,7 @@ def rollout(
     exclude_infos: bool = True,
     verbose: bool = True,
     label_info: Optional[Dict[str, Any]] = None,
+    reference_trajectory: Optional[np.ndarray] = None,
     **kwargs: Any,
 ) -> Sequence[types.TrajectoryWithRew]:
     """Generate policy rollouts.
@@ -755,6 +757,14 @@ def rollout(
         verbose: If True, then print out rollout stats before saving.
         label_info: Will add noise labels to the info of each trajectory,
             as a key: {"noise_level": epsilon}
+        reference_trajectory: Optional reference trajectory of shape
+            ``(T_ref, state_dim)``.  When provided, each completed trajectory
+            gets per-step ``"reference_state"`` entries injected into its
+            ``infos`` dicts (``infos[t]["reference_state"] = reference_trajectory[t]``).
+            Episodes shorter than ``T_ref`` use only the first ``len(episode)``
+            reference states; episodes longer than ``T_ref`` raise a
+            ``ValueError``.  Requires ``exclude_infos=False``, otherwise the
+            reference states would be silently discarded.
         **kwargs: Passed through to `generate_trajectories`.
 
     Returns:
@@ -762,6 +772,12 @@ def rollout(
         may be collected to avoid biasing process towards short episodes; the user
         should truncate if required.
     """
+    if reference_trajectory is not None and exclude_infos:
+        raise ValueError(
+            "reference_trajectory requires exclude_infos=False, otherwise the "
+            "injected reference states would be immediately discarded."
+        )
+
     trajs = generate_trajectories(
         policy,
         venv,

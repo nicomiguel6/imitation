@@ -469,69 +469,154 @@ class BasicRewardNet(RewardNet):
         return outputs
 
 
-class TrajectoryRewardNet(BasicRewardNet):
-    """State-only reward network for trajectory preference learning (D-REX).
+class ReferenceTrajectoryRewardNet(RewardNet):
+    """Reward network conditioned on both the current state and a reference state.
 
-    Maps each state to a scalar reward R_θ(s).  Trajectory-level return is
-    the sum of per-state rewards: J(τ) = Σ_t R_θ(s_t).  Preference pairs
-    are scored via cross-entropy over [J(τ_i), J(τ_j)].
+    The MLP receives ``cat([state, reference_state], dim=-1)`` as input
+    (``2 * state_dim`` features), so the network can learn a reward that
+    is shaped by the tracking error between the agent's current state and
+    the desired reference trajectory.
+
+    Two usage modes are supported:
+
+    **IRL / preference training** — call :meth:`cumulative_reward` or
+    :meth:`compare` directly.  These methods accept explicit ``reference_trajectory``
+    tensors and handle the concatenation internally.
+
+    **RL rollout evaluation** — the standard :meth:`forward` / :meth:`predict`
+    interface is available, but the ``state`` input must already be the
+    pre-concatenated ``[state ‖ reference_state]`` vector of shape
+    ``(batch, 2 * state_dim)``.  Use :meth:`forward_with_reference` as a
+    convenience wrapper when the two tensors are separate.
     """
 
     def __init__(
         self,
         observation_space: gym.Space,
         action_space: gym.Space,
-        use_state: bool = True,
-        use_action: bool = False,
-        use_next_state: bool = False,
-        use_done: bool = False,
         hid_sizes: Sequence[int] = (256, 256),
         **kwargs,
     ):
-        super().__init__(
-            observation_space=observation_space,
-            action_space=action_space,
-            use_state=use_state,
-            use_action=use_action,
-            use_next_state=use_next_state,
-            use_done=use_done,
+        """Build the reward MLP.
+
+        Args:
+            observation_space: Observation space of the environment.  Determines
+                the state dimension; the actual MLP input is ``2 * state_dim``.
+            action_space: Action space of the environment (not used as MLP input,
+                but required by the :class:`RewardNet` interface).
+            hid_sizes: Widths of the hidden layers.
+            **kwargs: Forwarded to :func:`~imitation.util.networks.build_mlp`.
+        """
+        super().__init__(observation_space, action_space)
+        state_dim = preprocessing.get_flattened_obs_dim(observation_space)
+        self.mlp = networks.build_mlp(
+            in_size=2 * state_dim,
             hid_sizes=hid_sizes,
+            out_size=1,
+            squeeze_output=True,
             **kwargs,
         )
 
-    def cumulative_reward(self, traj: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
-        """Compute cumulative reward for a trajectory snippet.
+    def forward(
+        self,
+        state: th.Tensor,
+        action: th.Tensor,
+        next_state: th.Tensor,
+        done: th.Tensor,
+    ) -> th.Tensor:
+        """Compute rewards from a pre-augmented state tensor.
+
+        ``state`` must already be the concatenation ``[s ‖ r]`` of shape
+        ``(batch, 2 * state_dim)``.  When the two parts are available
+        separately, prefer :meth:`forward_with_reference`.
 
         Args:
-            traj: State trajectory with shape (n_timesteps, state_dim).
+            state: Pre-concatenated ``[current_state ‖ reference_state]``,
+                shape ``(batch, 2 * state_dim)``.
+            action: Not used; present only for interface compatibility.
+            next_state: Not used; present only for interface compatibility.
+            done: Not used; present only for interface compatibility.
 
         Returns:
-            sum_rewards: Scalar sum of per-state rewards, Σ R_θ(s_t).
-            sum_abs_rewards: Scalar sum of absolute per-state rewards,
-                Σ |R_θ(s_t)|, used for L1 regularisation.
+            Per-step rewards of shape ``(batch,)``.
         """
-        per_state_rewards = BasicRewardNet.forward(self, traj)
-        return th.sum(per_state_rewards), th.sum(th.abs(per_state_rewards))
+        unbatched = state.dim() == 1
+        if unbatched:
+            state = state.unsqueeze(0)
+        rewards = self.mlp(state)
+        if unbatched:
+            rewards = rewards.squeeze(0)
+        return rewards
+
+    def forward_with_reference(
+        self,
+        state: th.Tensor,
+        reference_state: th.Tensor,
+    ) -> th.Tensor:
+        """Compute per-step rewards given separate state and reference tensors.
+
+        Concatenates the two inputs along the feature dimension and passes
+        them through the MLP.
+
+        Args:
+            state: Current states of shape ``(batch, state_dim)``.
+            reference_state: Reference states of shape ``(batch, state_dim)``.
+
+        Returns:
+            Per-step rewards of shape ``(batch,)``.
+        """
+        x = th.cat([th.flatten(state, 1), th.flatten(reference_state, 1)], dim=-1)
+        return self.mlp(x)
+
+    def cumulative_reward(
+        self,
+        traj: th.Tensor,
+    ) -> Tuple[th.Tensor, th.Tensor]:
+        """Sum per-step rewards over a pre-augmented trajectory snippet.
+
+        Args:
+            traj: Augmented trajectory of shape ``(T, 2 * state_dim)`` where the
+                first ``state_dim`` columns are the actual states and the last
+                ``state_dim`` columns are the corresponding reference states at
+                each timestep.
+
+        Returns:
+            ``(sum_rewards, sum_abs_rewards)`` – scalar tensors.
+            ``sum_abs_rewards`` is :math:`\\sum_t |R_\\theta(s_t, r_t)|` and
+            can be used as an L1 regularisation term.
+        """
+        per_step = self.mlp(traj)
+        return th.sum(per_step), th.sum(th.abs(per_step))
 
     def compare(
-        self, traj_i: th.Tensor, traj_j: th.Tensor,
+        self,
+        traj_i: th.Tensor,
+        traj_j: th.Tensor,
     ) -> Tuple[th.Tensor, th.Tensor]:
-        """Compare two trajectory snippets by cumulative reward.
+        """Compare two pre-augmented trajectory snippets by cumulative reward.
+
+        Each snippet is expected to already contain the reference trajectory
+        concatenated into the state: ``snippet[:, :state_dim]`` are the actual
+        states and ``snippet[:, state_dim:]`` are the corresponding reference
+        states.
 
         Args:
-            traj_i: First snippet, shape (n_i, state_dim).
-            traj_j: Second snippet, shape (n_j, state_dim).
+            traj_i: First augmented snippet of shape ``(T_i, 2 * state_dim)``.
+            traj_j: Second augmented snippet of shape ``(T_j, 2 * state_dim)``.
 
         Returns:
-            logits: Tensor of shape (2,) containing [J(τ_i), J(τ_j)],
-                suitable for cross-entropy against a preference label where
-                label=0 means τ_i is preferred and label=1 means τ_j is preferred.
-            abs_reward_sum: Combined absolute-reward regularisation term.
+            ``(logits, abs_reward_sum)`` where *logits* has shape ``(2,)``
+            containing ``[J(τ_i), J(τ_j)]``, suitable for cross-entropy with a
+            preference label (0 = τ_i preferred, 1 = τ_j preferred), and
+            *abs_reward_sum* is the combined L1 regularisation term.
         """
         cum_r_i, abs_r_i = self.cumulative_reward(traj_i)
         cum_r_j, abs_r_j = self.cumulative_reward(traj_j)
-        logits = th.stack([cum_r_i, cum_r_j])
-        return logits, abs_r_i + abs_r_j
+        return th.stack([cum_r_i, cum_r_j]), abs_r_i + abs_r_j
+
+
+# Backwards-compatible alias.
+TrajectoryRewardNet = ReferenceTrajectoryRewardNet
 
 
 class CnnRewardNet(RewardNet):

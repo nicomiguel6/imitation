@@ -40,6 +40,7 @@ from imitation.data.types import TrajectoryWithRew
 from imitation.data.types import Trajectory
 from imitation.scripts.NTRIL.double_integrator.double_integrator import DoubleIntegratorSuboptimalPolicy
 from imitation.policies.base import NonTrainablePolicy
+from imitation.scripts.NTRIL.double_integrator.double_integrator import generate_reference_trajectory
 
 import matplotlib.pyplot as plt
 
@@ -528,6 +529,10 @@ def run_ntril_training(
         save_dir=save_dir,
     )
 
+    # Load reference trajectory
+    reference_trajectory = np.load(os.path.join(save_dir, "reference_trajectory.npy"))
+    reference_trajectory_mpc = Trajectory(obs=reference_trajectory, acts=np.zeros((venv.max_episode_steps, 1)), infos=np.array([{}] * venv.max_episode_steps), terminal=True)
+
     if suboptimal_policy is not None:
         # A pre-trained suboptimal policy is already available — skip BC.
         ntril_trainer = NTRILTrainer.from_policy(suboptimal_policy, **common_kwargs)
@@ -603,12 +608,13 @@ def run_ntril_training(
                 for key, value in bc_stats.items():
                     print(f"  {key}: {value}")
 
-        elif step_num == 2: # Generates noisy rollouts from BC policy
+        elif step_num == 2: # Generates noisy rollouts from BC/suboptimal policy
             if suboptimal_policy is None:
                 raise ValueError("Suboptimal policy is required for step 2")
             print("Step 2: Generating noisy rollouts...")
             _, rollout_stats = ntril_trainer._generate_noisy_rollouts(
-                force_retrain="rollouts" in _force_set
+                force_retrain="rollouts" in _force_set,
+                reference_trajectory=reference_trajectory_mpc,
             )
             step_results["rollouts"] = rollout_stats
             print(
@@ -797,6 +803,16 @@ def main():
     rngs = np.random.default_rng()
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
     ghost_env = gym.make(env_id)
+
+    # Set up reference trajectory and save
+    reference_trajectory = generate_reference_trajectory(
+        T=ghost_env.max_episode_steps,
+        dt=ghost_env.dt,
+        mode="constant",
+        target_position=0.0,
+    )
+    np.save(SAVE_DIR / "reference_trajectory.npy", reference_trajectory)
+    print(f"Saved reference trajectory to {SAVE_DIR / 'reference_trajectory.npy'}")
 
 
     print("\n" + "=" * 70)

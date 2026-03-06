@@ -1227,7 +1227,7 @@ if __name__ == "__main__": # test code
     disturbance_magnitude = 0.1
     disturbance_vertices = np.array([[disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, -disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude], [disturbance_magnitude, -disturbance_magnitude]])
     
-    dt = 0.1
+    dt = 0.2
     # Set up double integrator environment
     env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=40.0, dt = dt, disturbance_magnitude=disturbance_magnitude)
     # Set up reference trajectory

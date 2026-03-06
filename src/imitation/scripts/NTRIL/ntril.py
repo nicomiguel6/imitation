@@ -387,6 +387,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                     min_episodes=self.n_rollouts_per_noise,
                     min_timesteps=1000,
                 ),
+                reference_trajectory = self.reference_trajectory_mpc,
                 rng=self.rng,
                 label_info={"noise_level": noise_level},
                 exclude_infos=False,
