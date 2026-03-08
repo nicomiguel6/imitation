@@ -76,6 +76,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
     save_dir: Optional[str] = None
     rng: int = 42
     n_ensemble: int = 3
+    reference_trajectory: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Factory constructors
@@ -379,7 +380,9 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 }
             )
 
-            # Collect rollouts (exclude_infos=False so label_info / noise_applied stay)
+            # Collect rollouts (exclude_infos=False so label_info / noise_applied stay).
+            # reset_options forwards the reference trajectory to each sub-env at
+            # reset time so the augmented observation [s | r] is built correctly.
             rollouts = rollout.rollout(
                 noisy_policy,
                 self.venv,
@@ -387,10 +390,12 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                     min_episodes=self.n_rollouts_per_noise,
                     min_timesteps=1000,
                 ),
-                reference_trajectory = self.reference_trajectory_mpc,
                 rng=self.rng,
                 label_info={"noise_level": noise_level},
                 exclude_infos=False,
+                reset_options={"reference_trajectory": self.reference_trajectory}
+                if self.reference_trajectory is not None
+                else None,
             )
 
             self.noisy_rollouts.append(rollouts)

@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 import functools
 import pickle
-from typing import Optional, List, Sequence
+from typing import Optional, List, Sequence, Dict, Any
 
 import numpy as np
 import torch as th
@@ -443,6 +443,7 @@ def run_ntril_training(
     suboptimal_policy: Optional[NonTrainablePolicy] = None,
     demonstrations: Optional[Sequence[TrajectoryWithRew]] = None,
     env_id: str = "DoubleIntegrator-v0",
+    env_options: Optional[Dict[str, Any]] = {"max_episode_seconds": 40.0, "dt": 0.1},
     save_dir: str = "./ntril_outputs",
     noise_levels: tuple = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5),
     n_rollouts_per_noise: int = 10,
@@ -453,6 +454,7 @@ def run_ntril_training(
     just_plot_noisy_rollouts: bool = False,
     noisy_rollouts: Optional[Sequence[Trajectory]] = None,
     robust_mpc: Optional[RobustTubeMPC] = None,
+    reference_trajectory: Optional[np.ndarray] = None,
 ):
     """Run NTRIL training using the NTRILTrainer class.
 
@@ -467,6 +469,7 @@ def run_ntril_training(
         demonstrations: Suboptimal trajectory data (mutually exclusive with
             ``bc_policy``).
         env_id: Gymnasium environment ID.
+        env_options: Dictionary of options for the environment.
         save_dir: Directory to save outputs.
         noise_levels: Sequence of noise levels for data augmentation.
         n_rollouts_per_noise: Number of rollouts per noise level.
@@ -498,6 +501,7 @@ def run_ntril_training(
         rng=rng,
         n_envs=8,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
+        env_make_kwargs=env_options,
     )
 
     # Setup logger
@@ -531,7 +535,7 @@ def run_ntril_training(
 
     # Load reference trajectory
     reference_trajectory = np.load(os.path.join(save_dir, "reference_trajectory.npy"))
-    reference_trajectory_mpc = Trajectory(obs=reference_trajectory, acts=np.zeros((venv.max_episode_steps, 1)), infos=np.array([{}] * venv.max_episode_steps), terminal=True)
+    reference_trajectory_mpc = Trajectory(obs=reference_trajectory, acts=np.zeros((venv.envs[0].max_episode_steps, 1)), infos=np.array([{}] * venv.envs[0].max_episode_steps), terminal=True)
 
     if suboptimal_policy is not None:
         # A pre-trained suboptimal policy is already available — skip BC.
@@ -614,7 +618,7 @@ def run_ntril_training(
             print("Step 2: Generating noisy rollouts...")
             _, rollout_stats = ntril_trainer._generate_noisy_rollouts(
                 force_retrain="rollouts" in _force_set,
-                reference_trajectory=reference_trajectory_mpc,
+                # reference_trajectory=reference_trajectory_mpc,
             )
             step_results["rollouts"] = rollout_stats
             print(
@@ -802,15 +806,16 @@ def main():
 
     rngs = np.random.default_rng()
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
-    ghost_env = gym.make(env_id)
+    ghost_env = gym.make(env_id, max_episode_seconds=40.0, dt=0.1)
 
     # Set up reference trajectory and save
     reference_trajectory = generate_reference_trajectory(
         T=ghost_env.max_episode_steps,
         dt=ghost_env.dt,
         mode="constant",
-        target_position=0.0,
+        target_position=2.0,
     )
+    reference_trajectory_mpc = Trajectory(obs=reference_trajectory, acts=np.zeros((ghost_env.max_episode_steps, 1)), infos=np.array([{}] * ghost_env.max_episode_steps), terminal=True)
     np.save(SAVE_DIR / "reference_trajectory.npy", reference_trajectory)
     print(f"Saved reference trajectory to {SAVE_DIR / 'reference_trajectory.npy'}")
 
@@ -875,6 +880,7 @@ def main():
         disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
         control_bounds = (np.array([-2.0]), np.array([2.0])),
+        reference_trajectory = reference_trajectory_mpc,
     )
 
     robust_tube_mpc.setup()
@@ -929,10 +935,11 @@ def main():
             noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
             n_rollouts_per_noise=5,
             rl_total_timesteps=1_000_000,
-            run_individual_steps=[1,2,3,4,5,6],
-            retrain=["mpc", "ranking", "irl", "rl"],
-            just_plot_noisy_rollouts=False,
+            run_individual_steps=[2],
+            retrain=["rollouts", "mpc", "ranking", "irl", "rl"],
+            just_plot_noisy_rollouts=True,
             robust_mpc=robust_tube_mpc,
+            reference_trajectory=reference_trajectory,
         )
 
 

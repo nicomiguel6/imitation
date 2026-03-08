@@ -18,6 +18,9 @@ from imitation.policies.base import NonTrainablePolicy
 from scipy.linalg import solve_discrete_are
 from scipy.signal import cont2discrete
 
+from imitation.scripts.NTRIL.noise_injection import EpsilonGreedyNoiseInjector
+from imitation.scripts.NTRIL.noise_injection import NoisyPolicy
+
 
 # ---------------------------------------------------------------------------
 # Reference trajectory generator
@@ -155,6 +158,9 @@ def generate_reference_trajectory(
             "'constant', 'ramp', 'sinusoidal', 'waypoints', 'random_waypoints'."
         )
 
+    # Append final reference state (position and velocity) to the trajectory
+    ref_traj = np.concatenate([ref_traj, np.array([[ref_traj[-1, 0], ref_traj[-1, 1]]])], axis=0)
+
     return ref_traj
 
 
@@ -189,9 +195,9 @@ class DoubleIntegratorEnv(gym.Env):
     def __init__(
         self,
         dt: float = 1.0,
-        max_position: float = 50.0,
-        max_velocity: float = 50.0,
-        max_acceleration: float = 50.0,
+        max_position: float = 5000.0,
+        max_velocity: float = 5000.0,
+        max_acceleration: float = 5000.0,
         target_position: float = 0.0,
         position_tolerance: float = 0.1,
         velocity_tolerance: float = 0.1,
@@ -342,9 +348,16 @@ class DoubleIntegratorEnv(gym.Env):
         self.step_count = 0
 
         # Set reference trajectory for this episode.
+        # Priority: (1) explicit options, (2) sticky value from previous reset,
+        # (3) constant-position fallback.  The sticky behaviour ensures that
+        # VecEnv auto-resets (which call reset() without options) continue to
+        # use the same reference that was set via the initial venv.set_options()
+        # call, rather than silently falling back to the constant default.
         ref_traj = None
         if options is not None:
             ref_traj = options.get("reference_trajectory", None)
+        if ref_traj is None and self._ref_traj is not None:
+            ref_traj = self._ref_traj  # sticky: reuse from previous episode
         if ref_traj is None:
             ref_traj = generate_reference_trajectory(
                 T=self.max_episode_steps,
@@ -409,7 +422,7 @@ class DoubleIntegratorEnv(gym.Env):
         # if position == self.max_position and velocity > 0:
         #     velocity = 0
 
-        self.state = np.array([position, velocity], dtype=np.float32)
+        # self.state = np.array([position, velocity], dtype=np.float32)
         self.step_count += 1
 
         # Reference at the current (post-step) time.
@@ -520,10 +533,28 @@ class DoubleIntegratorSuboptimalPolicy(NonTrainablePolicy):
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
-    # Test the reference trajectory generator
-    ref_traj = generate_reference_trajectory(T=200, dt=1.0, mode="sinusoidal", amplitude=1.0, frequency=0.1, phase=0.0)
-    print(ref_traj)
-    plt.plot(ref_traj[:, 0], label="Position")
-    plt.plot(ref_traj[:, 1], label="Velocity")
+    # Test the reference trajectory generator and suboptimal policy
+    env = DoubleIntegratorEnv(max_episode_seconds=400.0, dt=0.1, max_position=5000.0, max_velocity=5000.0, max_acceleration=5000.0)
+    ref_traj = generate_reference_trajectory(T=env.max_episode_steps, dt=env.dt, mode="constant", target_position=2.0)
+    suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+    )
+
+    suboptimal_policy.set_K_values(0.02, 0.3)
+
+    obs, info = env.reset(options={"reference_trajectory": ref_traj})
+    states = [obs.copy()]
+    actions = []
+    for step in range(env.max_episode_steps):
+        action = suboptimal_policy._choose_action(obs)  
+        obs, reward, terminated, truncated, info = env.step(action)
+        states.append(obs.copy())
+        actions.append(action.reshape(1,))
+        if terminated or truncated:
+            break
+    print(states[-1])
+    plt.plot(np.array(states)[:, 0], label="Position")
+    plt.plot(ref_traj[:, 0], label="Reference Position")
     plt.legend()
     plt.show()
