@@ -195,9 +195,9 @@ class DoubleIntegratorEnv(gym.Env):
     def __init__(
         self,
         dt: float = 1.0,
-        max_position: float = 5000.0,
-        max_velocity: float = 5000.0,
-        max_acceleration: float = 5000.0,
+        max_position: float = 50.0,
+        max_velocity: float = 50.0,
+        max_acceleration: float = 50.0,
         target_position: float = 0.0,
         position_tolerance: float = 0.1,
         velocity_tolerance: float = 0.1,
@@ -206,6 +206,7 @@ class DoubleIntegratorEnv(gym.Env):
         control_cost_weight: float = 0.1,
         max_episode_seconds: float = 20.0,
         disturbance_magnitude: float = 0.0,
+        reference_trajectory: Optional[np.ndarray] = None,
     ):
         """Initialize the double integrator environment.
 
@@ -226,6 +227,12 @@ class DoubleIntegratorEnv(gym.Env):
                 ``int(round(max_episode_seconds / dt))`` so the episode length
                 stays constant when ``dt`` changes.
             disturbance_magnitude: Scale of additive process disturbance.
+            reference_trajectory: Default reference trajectory of shape
+                ``(T, 2)``.  Stored as the initial sticky value so that every
+                episode (including auto-resets) tracks this reference unless
+                explicitly overridden via ``reset(options={"reference_trajectory":
+                ...})``.  When ``None``, the first ``reset()`` falls back to a
+                constant-position reference at ``target_position``.
         """
         super().__init__()
 
@@ -289,8 +296,14 @@ class DoubleIntegratorEnv(gym.Env):
         self.R = np.diag([control_cost_weight])
         self.P = solve_discrete_are(self.A_d, self.B_d, self.Q, self.R)
 
-        # Reference trajectory: shape (T, 2), set at reset() time.
-        self._ref_traj: Optional[np.ndarray] = None
+        # Reference trajectory: shape (T, 2).  Pre-populated from the
+        # constructor argument so auto-resets inherit it without needing
+        # reset(options=...) on every episode.
+        self._ref_traj: Optional[np.ndarray] = (
+            np.asarray(reference_trajectory, dtype=np.float32)
+            if reference_trajectory is not None
+            else None
+        )
 
     # ------------------------------------------------------------------
     # Properties
@@ -422,7 +435,7 @@ class DoubleIntegratorEnv(gym.Env):
         # if position == self.max_position and velocity > 0:
         #     velocity = 0
 
-        # self.state = np.array([position, velocity], dtype=np.float32)
+        self.state = np.array([position, velocity], dtype=np.float32)
         self.step_count += 1
 
         # Reference at the current (post-step) time.
@@ -534,7 +547,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     # Test the reference trajectory generator and suboptimal policy
-    env = DoubleIntegratorEnv(max_episode_seconds=400.0, dt=0.1, max_position=5000.0, max_velocity=5000.0, max_acceleration=5000.0)
+    env = DoubleIntegratorEnv(max_episode_seconds=200.0, dt=0.01, max_position=50.0, max_velocity=50.0, max_acceleration=50.0)
     ref_traj = generate_reference_trajectory(T=env.max_episode_steps, dt=env.dt, mode="constant", target_position=2.0)
     suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
         observation_space=env.observation_space,
@@ -542,6 +555,14 @@ if __name__ == "__main__":
     )
 
     suboptimal_policy.set_K_values(0.02, 0.3)
+
+    tmp_env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
+    tmp_env.close()
+    spec = tmp_env.spec
+
+    options = {"max_episode_seconds": 40.0, "dt": 0.1, "reference_trajectory": ref_traj}
+    env2 = gym.make(spec, **options)
+
 
     obs, info = env.reset(options={"reference_trajectory": ref_traj})
     states = [obs.copy()]

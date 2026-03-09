@@ -55,8 +55,8 @@ class RobustTubeMPC:
             time_step: discretization time step for MPC
             disturbance_bound: Bound for disturbance set
             tube_radius: Radius of the robust tube
-            A: State Dynamics matrix
-            B: Control Dynamics matrix
+            A: State Dynamics matrix [MUST BE DISCRETE TIME]
+            B: Control Dynamics matrix [MUST BE DISCRETE TIME]
             Q: State cost matrix (if None, will be identity)
             R: Control cost matrix (if None, will be identity)
             disturbance_vertices: Vertices of disturbance distribution
@@ -254,6 +254,14 @@ class RobustTubeMPC:
             # upper bounds of the input
             mpc.bounds["upper", "_u", "u"] = np.array([self.b_u[1]])
 
+        # Print the bounds
+        if self.disturbance_bound is not None:
+            print("---------------------------------------------------------")
+            print("Lower bounds of the states: ", mpc.bounds["lower", "_x", "x"])
+            print("Upper bounds of the states: ", mpc.bounds["upper", "_x", "x"])
+            print("Lower bounds of the input: ", mpc.bounds["lower", "_u", "u"])
+            print("Upper bounds of the input: ", mpc.bounds["upper", "_u", "u"])
+        
         mpc.settings.set_linear_solver("ma57")
         mpc.settings.supress_ipopt_output()
         mpc.set_objective(mterm=mterm, lterm=lterm)

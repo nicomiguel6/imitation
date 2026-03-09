@@ -488,6 +488,8 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             rtmpc_trajectories_for_noise_level = []
 
             for traj_idx, traj in enumerate(rollouts):
+                # Remove physical state from trajectory
+                traj = self._parse_trajectory(traj)
                 # Apply robust tube MPC to each trajectory to get nominal trajectory
                 self.robust_mpc.set_reference_trajectory(traj)
                 rtmpc_trajectory = self._solve_rtmpc(traj.obs[0], traj)
@@ -822,45 +824,52 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         )
     
     def _solve_rtmpc(self, initial_state: np.ndarray, reference_trajectory: types.Trajectory) -> types.TrajectoryWithRew:
+        """Run the Robust Tube MPC over a full trajectory using :meth:`RobustTubeMPC.solve_mpc`.
 
+        Args:
+            initial_state: Initial observation (may be augmented; the physical
+                slice is extracted automatically by ``reset_episode``).
+            reference_trajectory: Noisy rollout trajectory that defines the
+                episode length and carries noise metadata in its ``infos``.
+
+        Returns:
+            RTMPC nominal trajectory as a :class:`~imitation.data.types.TrajectoryWithRew`.
+        """
         current_noise_level = reference_trajectory.infos[0].get("noise_level")
         total_applied_noise_sum = reference_trajectory.infos[-1].get("total_applied_noise_sum")
 
-        # Observation may be augmented; MPC operates on physical state only.
-        initial_state = self.robust_mpc._extract_physical_state(initial_state)
+        # Reset MPC state machine for a fresh episode (sets z_nominal, warm-starts NLP).
+        self.robust_mpc.reset_episode(initial_state)
 
-        self.robust_mpc.mpc.set_initial_guess()
-        self.robust_mpc.mpc.x0 = initial_state
-        self.robust_mpc.simulator.x0 = initial_state
-        
-        state = initial_state
-
+        phys_initial = self.robust_mpc._extract_physical_state(initial_state)
         builder = util.TrajectoryBuilder()
-        builder.start_episode(initial_obs=initial_state)
+        builder.start_episode(initial_obs=phys_initial)
 
-        for t in range(len(reference_trajectory.obs)):
-            # Compute nominal optimal control from MPC
-            u_nom = self.robust_mpc.mpc.make_step(state)
-            
-            # Predict nominal state (first predicted state in the horizon)
-            nominal_state = self.robust_mpc.mpc.data.prediction(("_x", "x"))[:, 0]
-
-            # Convert to column vectors for disturbance rejection control law
-            state_col = np.asarray(state).reshape(-1, 1)
-            nominal_col = np.asarray(nominal_state).reshape(-1, 1)
-
-            # Compute applied control with disturbance rejection control law
-            applied_u = u_nom + self.robust_mpc.K @ (state_col - nominal_col)
-
-            # Simulate the next state using the simulator
-            next_state = self.robust_mpc.simulator.make_step(u0=applied_u)
+        state = phys_initial
+        n_steps = len(reference_trajectory.obs) - 1
+        for _ in range(n_steps):
+            next_state, applied_u, _ = self.robust_mpc.solve_mpc(state)
+            builder.add_step(
+                action=applied_u.flatten(),
+                next_obs=next_state.flatten(),
+                reward=0.0,
+                info={
+                    "noise_level": current_noise_level,
+                    "total_applied_noise_sum": total_applied_noise_sum,
+                },
+            )
             state = next_state
 
-            builder.add_step(action=applied_u.flatten(), next_obs=next_state.flatten(), reward=0.0, info={"noise_level": current_noise_level, "total_applied_noise_sum": total_applied_noise_sum})
-
-        rtmpc_trajectory = builder.finish()
+        return builder.finish()
     
-        return rtmpc_trajectory
+    def _parse_trajectory(self, trajectory: types.Trajectory) -> types.Trajectory:
+        """Parse a trajectory to remove the physical state."""
+        return types.Trajectory(
+            obs=trajectory.obs[:, :self.robust_mpc.state_dim],
+            acts=trajectory.acts,
+            infos=trajectory.infos,
+            terminal=trajectory.terminal,
+        )
     
     @property
     def robust_mpc(self) -> RobustTubeMPC:

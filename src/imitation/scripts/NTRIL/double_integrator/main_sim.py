@@ -495,6 +495,10 @@ def run_ntril_training(
 
     rng = np.random.default_rng(42)
 
+    # Load reference trajectory
+    # reference_trajectory = np.load(os.path.join(save_dir, "reference_trajectory.npy"))
+    env_options["reference_trajectory"] = reference_trajectory
+
     # Create environment
     venv = util.make_vec_env(
         env_id,
@@ -533,10 +537,6 @@ def run_ntril_training(
         save_dir=save_dir,
     )
 
-    # Load reference trajectory
-    reference_trajectory = np.load(os.path.join(save_dir, "reference_trajectory.npy"))
-    reference_trajectory_mpc = Trajectory(obs=reference_trajectory, acts=np.zeros((venv.envs[0].max_episode_steps, 1)), infos=np.array([{}] * venv.envs[0].max_episode_steps), terminal=True)
-
     if suboptimal_policy is not None:
         # A pre-trained suboptimal policy is already available — skip BC.
         ntril_trainer = NTRILTrainer.from_policy(suboptimal_policy, **common_kwargs)
@@ -549,6 +549,7 @@ def run_ntril_training(
     if robust_mpc is not None:
         ntril_trainer.robust_mpc = robust_mpc
 
+    # reference_trajectory_mpc = Trajectory(obs=reference_trajectory, acts=np.zeros((venv.envs[0].max_episode_steps, 1)), infos=np.array([{}] * venv.envs[0].max_episode_steps), terminal=True)
     # Run training
     irl_train_kwargs = {}
     rl_train_kwargs = {}
@@ -806,7 +807,9 @@ def main():
 
     rngs = np.random.default_rng()
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
-    ghost_env = gym.make(env_id, max_episode_seconds=40.0, dt=0.1)
+    max_episode_seconds = 200.0
+    dt = 1.0
+    ghost_env = gym.make(env_id, max_episode_seconds=max_episode_seconds, dt=dt)
 
     # Set up reference trajectory and save
     reference_trajectory = generate_reference_trajectory(
@@ -818,6 +821,8 @@ def main():
     reference_trajectory_mpc = Trajectory(obs=reference_trajectory, acts=np.zeros((ghost_env.max_episode_steps, 1)), infos=np.array([{}] * ghost_env.max_episode_steps), terminal=True)
     np.save(SAVE_DIR / "reference_trajectory.npy", reference_trajectory)
     print(f"Saved reference trajectory to {SAVE_DIR / 'reference_trajectory.npy'}")
+
+    env_options = {"max_episode_seconds": max_episode_seconds, "dt": dt, "reference_trajectory": reference_trajectory}
 
 
     print("\n" + "=" * 70)
@@ -870,13 +875,13 @@ def main():
     # Step 1: Set up robust tube MPC for data augmentation
     robust_tube_mpc = RobustTubeMPC(
         horizon = 10,
-        time_step = 1.0,
+        time_step = dt,
         disturbance_bound = 0.1,
         tube_radius = 0.05,
-        A = np.array([[0.0, 1.0], [0.0, 0.0]]),
-        B = np.array([[0.0], [1.0]]),
+        A = ghost_env.A_d,
+        B = ghost_env.B_d,
         Q = np.diag([10.0, 1.0]),
-        R = 0.01*np.eye(1),
+        R = 0.1*np.eye(1),
         disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
         control_bounds = (np.array([-2.0]), np.array([2.0])),
@@ -931,13 +936,14 @@ def main():
         ntril_trainer = run_ntril_training(
             suboptimal_policy=suboptimal_policy,
             env_id=env_id,
+            env_options=env_options,
             save_dir=str(SAVE_DIR),
             noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
             n_rollouts_per_noise=5,
             rl_total_timesteps=1_000_000,
-            run_individual_steps=[2],
-            retrain=["rollouts", "mpc", "ranking", "irl", "rl"],
-            just_plot_noisy_rollouts=True,
+            run_individual_steps=[2, 3],
+            retrain=["mpc", "ranking", "irl", "rl"],
+            just_plot_noisy_rollouts=False,
             robust_mpc=robust_tube_mpc,
             reference_trajectory=reference_trajectory,
         )
@@ -945,26 +951,26 @@ def main():
 
 
 
-    # # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
-    # mpc_plot_dir = SCRIPT_DIR / "debug" / "plots" / "mpc"
-    # mpc_plot_dir.mkdir(parents=True, exist_ok=True)
-    # for idx, noise_level in enumerate(ntril_trainer.noise_levels):
-    #     nominal_noisy_rollout = ntril_trainer.noisy_rollouts[idx][0]
-    #     rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]
+    # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
+    mpc_plot_dir = SCRIPT_DIR / "debug" / "plots" / "mpc"
+    mpc_plot_dir.mkdir(parents=True, exist_ok=True)
+    for idx, noise_level in enumerate(ntril_trainer.noise_levels):
+        nominal_noisy_rollout = ntril_trainer.noisy_rollouts[idx][0]
+        rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]
         
-    #     fig, ax = plt.subplots()
-    #     ax.plot(nominal_noisy_rollout.obs[:, 0], label="Nominal Noisy Rollout")
-    #     ax.plot(rtmpc_trajectory.obs[:, 0], label="RTMPC Trajectory")
-    #     # sdet adjusted state bounds
-    #     ax.axhline(y=-robust_tube_mpc.b_x_t[1], color="r", linestyle="--", linewidth=1)
-    #     ax.axhline(y=robust_tube_mpc.b_x_t[3], color="r", linestyle="--", linewidth=1)
-    #     ax.legend()
-    #     ax.set_xlabel("Time")
-    #     ax.set_ylabel("Position")
-    #     ax.set_title(f"Nominal Noisy Rollout vs RTMPC Trajectory at Noise Level {noise_level:.2f}")
-    #     plt.savefig(mpc_plot_dir / f"nominal_comparison_{noise_level:.2f}.png")
-    #     plt.close()
-    #     print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
+        fig, ax = plt.subplots()
+        ax.plot(nominal_noisy_rollout.obs[:, 0], label="Nominal Noisy Rollout")
+        ax.plot(rtmpc_trajectory.obs[:, 0], label="RTMPC Trajectory")
+        # sdet adjusted state bounds
+        ax.axhline(y=-robust_tube_mpc.b_x_t[1], color="r", linestyle="--", linewidth=1)
+        ax.axhline(y=robust_tube_mpc.b_x_t[3], color="r", linestyle="--", linewidth=1)
+        ax.legend()
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Position")
+        ax.set_title(f"Nominal Noisy Rollout vs RTMPC Trajectory at Noise Level {noise_level:.2f}")
+        plt.savefig(mpc_plot_dir / f"nominal_comparison_{noise_level:.2f}.png")
+        plt.close()
+        print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
 
     # # Plot RTMPC trajectory and augmented data for a noise level
     # noise_level = 0.0
