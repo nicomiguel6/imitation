@@ -410,49 +410,101 @@ def inspect_snippets(
 def plot_learned_reward_network(
     save_dir: str | Path = DEFAULT_SAVE_DIR,
     device: str = "cuda",
+    reference_trajectory: Optional[types.Trajectory] = None,
+    noise_level: float = 0.0,
+    traj_idx: int = 0,
+    ref_pos: float = 0.0,
+    ref_vel: float = 0.0,
 ) -> Tuple[plt.Figure, plt.Axes]:
-    """Plot the learned reward network phase portrait."""
+    """Plot the learned reward contour with an optional reference trajectory overlay.
 
-    # Set up double integrator environment
+    The observation fed to the network is [pos, vel, ref_pos, ref_vel].  The
+    meshgrid sweeps (pos, vel) while ref_pos and ref_vel are held constant,
+    which is appropriate when testing with a fixed target.
+
+    Args:
+        save_dir: NTRILTrainer output directory.
+        device: Torch device string.
+        reference_trajectory: Trajectory whose states will be overlaid on the
+            contour.  If None, the RTMPC nominal trajectory for *noise_level*
+            and *traj_idx* is loaded automatically from *save_dir*.
+        noise_level: Noise bin used to load the reference trajectory when
+            *reference_trajectory* is None.
+        traj_idx: Index into the RTMPC trajectory list for that noise bin.
+        ref_pos: Constant reference position appended to every grid state.
+        ref_vel: Constant reference velocity appended to every grid state.
+    """
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
     venv = gym.make(env_id)
 
-    # Load the learned reward network ensemble
-    reward_nets = []
+    # Load the learned reward network ensemble.
+    ensemble = []
     n_ensemble = 3
     for i in range(n_ensemble):
         reward_net_path = Path(save_dir) / "ensemble" / f"reward_net_{i}.pth"
-        reward_net = TrajectoryRewardNet(
+        net = TrajectoryRewardNet(
             observation_space=venv.observation_space,
             action_space=venv.action_space,
-            use_state=True,
-            use_action=False,
-            use_next_state=False,
-            use_done=False,
             hid_sizes=(256, 256),
         )
-        reward_net.load_state_dict(th.load(str(reward_net_path), map_location=device))
-        reward_nets.append(reward_net)
+        net.load_state_dict(th.load(str(reward_net_path), map_location=device))
+        net.to(device)
+        net.eval()
+        ensemble.append(net)
 
-    # Build a meshgrid over (position, velocity) — the full 2D state space.
+    # Build a meshgrid over (position, velocity) — the first two state dims.
+    # ref_pos and ref_vel are held constant to match the evaluation condition.
     n_grid = 100
     pos_vals = np.linspace(venv.observation_space.low[0], venv.observation_space.high[0], n_grid)
     vel_vals = np.linspace(venv.observation_space.low[1], venv.observation_space.high[1], n_grid)
-    pos_grid, vel_grid = np.meshgrid(pos_vals, vel_vals)  # each (n_grid, n_grid)
+    pos_grid, vel_grid = np.meshgrid(pos_vals, vel_vals)
 
-    # Flatten into (n_grid^2, 2) state matrix and evaluate R_θ(s).
-    states_flat = np.stack([pos_grid.ravel(), vel_grid.ravel()], axis=1).astype(np.float32)
-    with th.no_grad():
-        reward_flat = np.mean([reward_net.predict_processed(states_flat, np.zeros_like(states_flat), np.zeros_like(states_flat), np.zeros(states_flat.shape[0])) for reward_net in reward_nets], axis=0)  
-    reward_grid = reward_flat.reshape(n_grid, n_grid)
+    n_pts = n_grid * n_grid
+    states_flat = np.stack(
+        [
+            pos_grid.ravel(),
+            vel_grid.ravel(),
+            np.full(n_pts, ref_pos),
+            np.full(n_pts, ref_vel),
+        ],
+        axis=1,
+    ).astype(np.float32)
+    action_dim = venv.action_space.shape[0]
+    dummy_action = np.zeros((n_pts, action_dim), dtype=np.float32)
+    dummy_next = np.zeros_like(states_flat)
+    dummy_done = np.zeros(n_pts, dtype=np.float32)
 
-    # Plot as a filled contour over (position, velocity).
-    fig, ax = plt.subplots(figsize=(7, 6))
+    per_net = np.stack(
+        [net.predict_processed(states_flat, dummy_action, dummy_next, dummy_done) for net in ensemble],
+        axis=0,
+    )
+    reward_grid = per_net.mean(axis=0).reshape(n_grid, n_grid)
+
+    # Resolve the reference trajectory.
+    if reference_trajectory is None:
+        rtmpc_trajs, _ = load_augmented_data(save_dir, noise_level)
+        if traj_idx >= len(rtmpc_trajs):
+            raise IndexError(
+                f"traj_idx={traj_idx} but only {len(rtmpc_trajs)} RTMPC trajectories available"
+            )
+        reference_trajectory = rtmpc_trajs[traj_idx]
+
+    # Plot contour.
+    fig, ax = plt.subplots(figsize=(8, 6))
     cf = ax.contourf(pos_grid, vel_grid, reward_grid, levels=50, cmap="viridis")
     fig.colorbar(cf, ax=ax, label="R_θ(s)")
+
+    # # Overlay the reference trajectory.
+    # traj_pos = reference_trajectory.obs[:, 0]
+    # traj_vel = reference_trajectory.obs[:, 1]
+    # ax.plot(traj_pos, traj_vel, "w-", linewidth=1.5, label="Reference trajectory")
+    # ax.plot(traj_pos[0], traj_vel[0], "wo", markersize=7, label="Start")
+    # ax.plot(traj_pos[-1], traj_vel[-1], "w*", markersize=10, label="End")
+
     ax.set_xlabel("Position")
     ax.set_ylabel("Velocity")
-    ax.set_title("Learned reward contour R_θ(position, velocity)")
+    ax.set_title(f"Learned reward contour  |  noise={noise_level:.2f}, traj={traj_idx}")
+    ax.legend(loc="upper right", fontsize=8)
 
     out_path = Path(save_dir) / "reward_net_contour.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -478,7 +530,6 @@ def measure_ranking_separability(
     
     # define reward function using MPC cost
     Q = np.diag([1.0, 0.0])
-    R = 0.01 * np.eye(1)
     def reward_function(states):
         reward_tmp = []
         for state in states:
@@ -530,6 +581,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("plot-reward-network", help="Plot the learned reward network phase portrait")
     sp.add_argument("--save-dir", type=str, default=str(DEFAULT_SAVE_DIR))
     sp.add_argument("--device", type=str, default="cuda")
+    sp.add_argument("--noise-level", type=float, default=0.0,
+                    help="Noise bin for the reference trajectory overlay")
+    sp.add_argument("--traj-idx", type=int, default=0,
+                    help="Which RTMPC trajectory to overlay")
+    sp.add_argument("--ref-pos", type=float, default=0.0,
+                    help="Constant reference position appended to grid states (default: 0.0)")
+    sp.add_argument("--ref-vel", type=float, default=0.0,
+                    help="Constant reference velocity appended to grid states (default: 0.0)")
 
     sp = sub.add_parser("measure-ranking-separability", help="Measure the ranking separability of the ranked dataset")
     sp.add_argument("--ensemble-dir", type=str, default=str(DEFAULT_SAVE_DIR))
@@ -554,15 +613,24 @@ if __name__ == "__main__":
         plot_learned_reward_network(
             save_dir=args.save_dir,
             device=args.device,
+            noise_level=args.noise_level,
+            traj_idx=args.traj_idx,
+            ref_pos=args.ref_pos,
+            ref_vel=args.ref_vel,
         )
     elif args.command == "measure-ranking-separability":
         measure_ranking_separability(
             ensemble_dir=args.ensemble_dir,
         )
     else:
-        # plot_learned_reward_network(
-        #     save_dir=DEFAULT_SAVE_DIR,
-        #     device="cpu",
-        # )
-        measure_ranking_separability()
+
+        reference_trajectory = np.load(DEFAULT_SAVE_DIR / "reference_trajectory.npy")
+        plot_learned_reward_network(
+            save_dir=DEFAULT_SAVE_DIR,
+            device="cpu",
+            reference_trajectory=reference_trajectory,
+            ref_pos=2.0,
+            ref_vel=0.0,
+        )
+        # measure_ranking_separability()
         # _build_parser().print_help()

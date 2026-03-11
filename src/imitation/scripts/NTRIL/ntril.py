@@ -185,10 +185,6 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             reward_net = TrajectoryRewardNet(
                 observation_space=self.venv.observation_space,
                 action_space=self.venv.action_space,
-                use_state=True,
-                use_action=False,
-                use_next_state=False,
-                use_done=False,
             )
             object.__setattr__(self, 'reward_net', reward_net)
 
@@ -488,16 +484,20 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             rtmpc_trajectories_for_noise_level = []
 
             for traj_idx, traj in enumerate(rollouts):
-                # Remove physical state from trajectory
-                traj = self._parse_trajectory(traj)
+                # Extract physical state from trajectory
+                traj_parsed = self._parse_trajectory(traj)
+                # Extract original reference trajectory
+                original_reference_states = self._extract_reference_states(traj)
                 # Apply robust tube MPC to each trajectory to get nominal trajectory
-                self.robust_mpc.set_reference_trajectory(traj)
-                rtmpc_trajectory = self._solve_rtmpc(traj.obs[0], traj)
+                self.robust_mpc.set_reference_trajectory(traj_parsed)
+                rtmpc_trajectory_phys = self._solve_rtmpc(traj_parsed.obs[0], traj_parsed)
+                # re append original reference trajectory to the rtmpc_trajectory
+                rtmpc_trajectory = self._append_states(rtmpc_trajectory_phys, original_reference_states)
                 rtmpc_trajectories_for_noise_level.append(rtmpc_trajectory)
 
                 # Augment from nominal trajectory to get augmented trajectories
                 augmented_trajectories = self.robust_mpc.augment_trajectory(
-                    rtmpc_trajectory
+                    rtmpc_trajectory_phys, reference_states=original_reference_states
                 )
                 augmented_data_for_noise_level.extend(augmented_trajectories)
             
@@ -816,10 +816,10 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         return TrajectoryRewardNet(
             observation_space=self.venv.observation_space,
             action_space=self.venv.action_space,
-            use_state=True,
-            use_action=False,
-            use_next_state=False,
-            use_done=False,
+            # use_state=True,
+            # use_action=False,
+            # use_next_state=False,
+            # use_done=False,
             hid_sizes=(256, 256),
         )
     
@@ -833,7 +833,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 episode length and carries noise metadata in its ``infos``.
 
         Returns:
-            RTMPC nominal trajectory as a :class:`~imitation.data.types.TrajectoryWithRew`.
+            RTMPC nominal trajectory as a numpy array
         """
         current_noise_level = reference_trajectory.infos[0].get("noise_level")
         total_applied_noise_sum = reference_trajectory.infos[-1].get("total_applied_noise_sum")
@@ -847,7 +847,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
         state = phys_initial
         n_steps = len(reference_trajectory.obs) - 1
-        for _ in range(n_steps):
+        for itr in range(n_steps):
             next_state, applied_u, _ = self.robust_mpc.solve_mpc(state)
             builder.add_step(
                 action=applied_u.flatten(),
@@ -866,6 +866,26 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         """Parse a trajectory to remove the physical state."""
         return types.Trajectory(
             obs=trajectory.obs[:, :self.robust_mpc.state_dim],
+            acts=trajectory.acts,
+            infos=trajectory.infos,
+            terminal=trajectory.terminal,
+        )
+    
+    def _extract_reference_states(self, trajectory: types.Trajectory) -> np.ndarray:
+        """Extract the reference trajectory from a trajectory. Should return a numpy array of shape (n_steps, state_dim), since we only care about getting the reference states"""
+        return trajectory.obs[:, self.robust_mpc.state_dim:]
+    
+    def _append_states(self, trajectory: types.Trajectory, additional_trajectory: np.ndarray) -> types.Trajectory:
+        """Append additional states to a trajectory.
+        Args:
+            trajectory: The trajectory to append the additional states to.
+            additional_trajectory: The additional states to append to the trajectory (should be an numpy array of shape (n_steps, state_dim))
+            NOTE: we use np.ndarray because we want to conserve the original acts, reward, and info fields of the original trajectory
+        Returns:
+            The trajectory with the additional states appended.
+        """
+        return types.Trajectory(
+            obs=np.concatenate([trajectory.obs, additional_trajectory], axis=1),
             acts=trajectory.acts,
             infos=trajectory.infos,
             terminal=trajectory.terminal,

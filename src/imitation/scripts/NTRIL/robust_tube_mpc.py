@@ -347,12 +347,11 @@ class RobustTubeMPC:
         )
 
     def _extract_physical_state(self, obs: np.ndarray) -> np.ndarray:
-        """Return the physical state slice from a (possibly augmented) observation.
+        """Return the physical state from a (possibly augmented) observation.
 
         The environment observation may be augmented with reference states,
         e.g. ``[pos, vel, ref_pos, ref_vel]``.  The MPC operates entirely in
-        physical state space (first ``state_dim`` elements), so every time an
-        observation flows into MPC machinery this method should be called first.
+        physical state space (first ``state_dim`` elements), so every time an observation flows into MPC machinery this method should be called first.
         """
         return np.asarray(obs).flatten()[:self.state_dim]
 
@@ -535,6 +534,7 @@ class RobustTubeMPC:
         partial_horizon: int = 50,
         k_timesteps: int = 5,
         n_augmentations: int = 5,
+        reference_states: Optional[np.ndarray] = None,
     ) -> Sequence[types.TrajectoryWithRew]:
         """Augment a trajectory using robust tube MPC. Sample points every k_timesteps and propagate partial trajectories following ancillary controller u = u0 + K(x-x0) .
 
@@ -543,7 +543,7 @@ class RobustTubeMPC:
             partial_horizon: Length of partial trajectory
             k_timesteps: Interval of time steps to select sample from
             n_augmentations: Number of augmented samples per transition
-
+            reference_states: Reference states to append to the augmented trajectories
         Returns:
             Collection of partial trajectories sampled from RTMPC trajectory
         """
@@ -586,7 +586,8 @@ class RobustTubeMPC:
 
                     # initialize trajectory builder
                     builder = util.TrajectoryBuilder()
-                    builder.start_episode(initial_obs=sample)
+                    sampled_reference_state = reference_states[t]
+                    builder.start_episode(initial_obs=np.concatenate((sample.flatten(), sampled_reference_state.flatten()), axis=0))
 
                     # initialize state and action
                     x = sample
@@ -604,12 +605,18 @@ class RobustTubeMPC:
                             )
                         )
                         x_next = self.simulator.make_step(u0=u_applied)
+                        
                         # calculate tracking cost
                         tracking_cost = self._compute_tracking_cost_metric(
                             self._extract_physical_state(trajectory.obs[t + t_step]), x, trajectory.acts[t + t_step], u_applied, t + t_step
                         )
                         # calculate margin to safety violation
                         margin_safety = self._compute_margin_safety_violation(x)
+                        x = x_next
+
+                        if reference_states is not None:
+                            x_next = np.concatenate((x_next, reference_states[t + t_step].reshape(-1, 1)), axis=0)
+                        
                         builder.add_step(
                             action=u_applied.flatten(),
                             next_obs=x_next.flatten(),
@@ -621,7 +628,6 @@ class RobustTubeMPC:
                                 "total_applied_noise_sum": total_applied_noise_sum,
                             },
                         )
-                        x = x_next
 
                         current_nominal_state = trajectory.obs[t + t_step]
                         current_nominal_action = trajectory.acts[t + t_step]
@@ -1235,40 +1241,40 @@ if __name__ == "__main__": # test code
     disturbance_magnitude = 0.1
     disturbance_vertices = np.array([[disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, -disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude], [disturbance_magnitude, -disturbance_magnitude]])
     
-    dt = 0.2
+    dt = 1.0
     # Set up double integrator environment
-    env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=40.0, dt = dt, disturbance_magnitude=disturbance_magnitude)
+    env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=200.0, dt = dt, disturbance_magnitude=disturbance_magnitude)
     # Set up reference trajectory
-    reference_trajectory = generate_reference_trajectory(T=env.max_episode_steps+1, dt=dt, mode="sinusoidal", amplitude=20.0, frequency=0.05, phase=0.0)
+    reference_trajectory = generate_reference_trajectory(T=env.max_episode_steps, dt=dt, mode="constant", target_position=2.0)
     reference_trajectory_mpc = types.Trajectory(obs=reference_trajectory, acts=np.zeros((env.max_episode_steps, 1)), infos=np.array([{}] * env.max_episode_steps), terminal=True)
 
     # Set up robust tube MPC for env usage
     robust_mpc = RobustTubeMPC(
-        horizon = 40,
+        horizon = 10,
         time_step = dt,
         A = env.A_d,
         B = env.B_d,
-        Q = np.diag([1.0, 1.0]),
+        Q = np.diag([10.0, 1.0]),
         R = 0.1*np.eye(1),
         disturbance_bound = disturbance_magnitude,
         disturbance_vertices = disturbance_vertices,
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-50.0]), np.array([50.0])),
+        control_bounds = (np.array([-2.0]), np.array([2.0])),
         reference_trajectory = reference_trajectory_mpc,
     )
 
     # set up identical robust tube MPC for internal usage
     robust_mpc_internal = RobustTubeMPC(
-        horizon = 40,
+        horizon = 10,
         time_step = dt,
         A = env.A_d,
         B = env.B_d,
-        Q = np.diag([1.0, 1.0]),
+        Q = np.diag([10.0, 1.0]),
         R = 0.1*np.eye(1),
         disturbance_bound = disturbance_magnitude,
         disturbance_vertices = disturbance_vertices,
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-50.0]), np.array([50.0])),
+        control_bounds = (np.array([-2.0]), np.array([2.0])),
         reference_trajectory = reference_trajectory_mpc,
     )
 
@@ -1279,7 +1285,7 @@ if __name__ == "__main__": # test code
     # approximate_linear_mrpi = compute_approximate_linear_mrpi(robust_mpc, disturbance_magnitude=disturbance_magnitude)
 
     # Run MPC for 100 steps and plot
-    initial_state = np.array([0.0, 0.0], dtype=np.float32)
+    initial_state = np.array([-5.0, 5.0], dtype=np.float32)
     obs, info = env.reset(
         state=initial_state,
         options={"reference_trajectory": reference_trajectory},

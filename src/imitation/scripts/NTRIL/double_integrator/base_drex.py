@@ -28,10 +28,11 @@ from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.scripts.NTRIL.double_integrator.double_integrator import (
     DoubleIntegratorSuboptimalPolicy,
 )
+from imitation.scripts.NTRIL.double_integrator.double_integrator import generate_reference_trajectory
 from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.util import logger as imit_logger
 from imitation.util import util
-
+from imitation.data import types
 import gymnasium as gym
 
 
@@ -154,6 +155,7 @@ class DREXTrainer(NTRILTrainer):
 
 def run_drex_training(
     env_id: str = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0",
+    env_options: Optional[Dict[str, Any]] = None,
     save_dir: str = "./drex_outputs",
     noise_levels: tuple = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
     n_rollouts_per_noise: int = 10,
@@ -187,11 +189,26 @@ def run_drex_training(
     rng = np.random.default_rng(42)
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
+    max_episode_seconds = 200.0
+    dt = 1.0
+    ghost_env = gym.make(env_id, max_episode_seconds=max_episode_seconds, dt=dt)
+
+    # Set up reference trajectory and save
+    reference_trajectory = generate_reference_trajectory(
+        T=ghost_env.max_episode_steps,
+        dt=ghost_env.dt,
+        mode="constant",
+        target_position=2.0,
+    )
+
+    env_options["reference_trajectory"] = reference_trajectory
+
     venv = util.make_vec_env(
         env_id,
         rng=rng,
         n_envs=8,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
+        env_make_kwargs=env_options,
     )
 
     custom_logger = imit_logger.configure(
@@ -245,12 +262,13 @@ def main():
 
     run_drex_training(
         env_id="imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0",
+        env_options={"max_episode_seconds": 200.0, "dt": 1.0},
         save_dir=str(SAVE_DIR),
-        noise_levels=tuple(np.arange(0.0, 1.0, 0.05)),
+        noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
         n_rollouts_per_noise=5,
         n_ensemble=3,
         rl_total_timesteps=1_000_000,
-        retrain=None,
+        retrain="all",
     )
 
     print(f"\nAll outputs saved to: {SAVE_DIR}")

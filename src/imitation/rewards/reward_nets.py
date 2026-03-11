@@ -510,7 +510,7 @@ class ReferenceTrajectoryRewardNet(RewardNet):
         super().__init__(observation_space, action_space)
         state_dim = preprocessing.get_flattened_obs_dim(observation_space)
         self.mlp = networks.build_mlp(
-            in_size=2 * state_dim,
+            in_size=state_dim,
             hid_sizes=hid_sizes,
             out_size=1,
             squeeze_output=True,

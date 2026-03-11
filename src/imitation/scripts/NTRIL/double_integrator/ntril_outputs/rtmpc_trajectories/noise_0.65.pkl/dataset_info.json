@@ -32,13 +32,6 @@
     "terminal": {
       "dtype": "bool",
       "_type": "Value"
-    },
-    "rews": {
-      "feature": {
-        "dtype": "float64",
-        "_type": "Value"
-      },
-      "_type": "Sequence"
     }
   },
   "homepage": "",
