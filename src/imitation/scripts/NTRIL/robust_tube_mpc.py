@@ -535,15 +535,26 @@ class RobustTubeMPC:
         k_timesteps: int = 5,
         n_augmentations: int = 5,
         reference_states: Optional[np.ndarray] = None,
+        simulate_to_end: bool = False,
+        initial_state_only: bool = False,
     ) -> Sequence[types.TrajectoryWithRew]:
         """Augment a trajectory using robust tube MPC. Sample points every k_timesteps and propagate partial trajectories following ancillary controller u = u0 + K(x-x0) .
 
         Args:
             trajectory: Trajectory to augment
-            partial_horizon: Length of partial trajectory
-            k_timesteps: Interval of time steps to select sample from
+            partial_horizon: Length of partial trajectory (ignored when simulate_to_end=True
+                or initial_state_only=True)
+            k_timesteps: Interval of time steps to select sample from (ignored when
+                initial_state_only=True)
             n_augmentations: Number of augmented samples per transition
             reference_states: Reference states to append to the augmented trajectories
+            simulate_to_end: If True, each sampled trajectory is propagated until the
+                end of the episode rather than for a fixed partial_horizon.  Every
+                timestep that is a multiple of k_timesteps is eligible regardless of
+                how many steps remain.
+            initial_state_only: If True, only t=0 is processed and each sample is
+                propagated until the end of the episode (T steps).  Overrides both
+                simulate_to_end and the k_timesteps eligibility check.
         Returns:
             Collection of partial trajectories sampled from RTMPC trajectory
         """
@@ -558,93 +569,111 @@ class RobustTubeMPC:
         # still see the correct t_now without relying on _episode_step to override it.
         _saved_sim_t0 = float(self.simulator.t0)
 
-        for t in range(len(trajectory.obs) - 1):
-            if t % k_timesteps == 0 and t + partial_horizon < len(trajectory.obs):
+        n_obs = len(trajectory.obs)
 
-                augmented_trajs_t = []
+        for t in range(n_obs - 1):
+            # Determine number of simulation steps and eligibility for this timestep.
+            if initial_state_only:
+                eligible = t == 0
+                n_steps = n_obs - 1  # always simulate the full episode from t=0
+            elif simulate_to_end:
+                n_steps = n_obs - 1 - t  # steps from t to the last obs
+                eligible = t % k_timesteps == 0 and n_steps > 0
+            else:
+                n_steps = partial_horizon - 1
+                eligible = t % k_timesteps == 0 and t + partial_horizon < n_obs
 
-                # Extract current nominal state and action
-                current_nominal_state = trajectory.obs[t]
-                current_nominal_action = trajectory.acts[t]
-                current_noise_level = trajectory.infos[t].get("noise_level")
-                total_applied_noise_sum = trajectory.infos[-1].get("total_applied_noise_sum")
+            if not eligible:
+                continue
 
-                # Sample points at center of bounding box facets
-                tube_set = current_nominal_state + self.Z
-                approx_tube = get_approximate_tube(tube_set)
-                samples = get_samples(approx_tube, corners=False)
+            augmented_trajs_t = []
 
-                # Simulate a partial trajectory for each sample.
-                # The simulator's t0 is reset to t * time_step at the start of each
-                # sample so every sample in the same outer iteration starts from the
-                # same reference-trajectory index.
-                for sample in samples:
+            # Extract current nominal state and action
+            current_nominal_state = trajectory.obs[t]
+            current_nominal_action = trajectory.acts[t]
+            current_noise_level = trajectory.infos[t].get("noise_level")
+            total_applied_noise_sum = trajectory.infos[-1].get("total_applied_noise_sum")
 
-                    # Reset simulator time to the nominal time of this outer step
-                    # so the TVP (reference look-up) is consistent across samples.
-                    self.simulator.t0 = t * self.time_step
+            # Sample points at center of bounding box facets
+            tube_set = current_nominal_state + self.Z
+            approx_tube = get_approximate_tube(tube_set)
+            samples = get_samples(approx_tube, corners=False)
 
-                    # initialize trajectory builder
-                    builder = util.TrajectoryBuilder()
-                    sampled_reference_state = reference_states[t]
-                    builder.start_episode(initial_obs=np.concatenate((sample.flatten(), sampled_reference_state.flatten()), axis=0))
+            # Simulate a partial trajectory for each sample.
+            # The simulator's t0 is reset to t * time_step at the start of each
+            # sample so every sample in the same outer iteration starts from the
+            # same reference-trajectory index.
+            for sample in samples:
 
-                    # initialize state and action
-                    x = sample
-                    u = current_nominal_action
-                    self.simulator.x0 = x
+                # Reset simulator time to the nominal time of this outer step
+                # so the TVP (reference look-up) is consistent across samples.
+                self.simulator.t0 = t * self.time_step
 
-                    # propagate dynamics
-                    for t_step in range(partial_horizon - 1):
-                        u_applied = current_nominal_action + self.K @ (
-                            x.T.reshape(
-                                -1, 1
-                            )
-                            - current_nominal_state.reshape(
-                                -1, 1
-                            )
+                # initialize trajectory builder
+                builder = util.TrajectoryBuilder()
+                sampled_reference_state = reference_states[t]
+                builder.start_episode(initial_obs=np.concatenate((sample.flatten(), sampled_reference_state.flatten()), axis=0))
+
+                # initialize state and action
+                x = sample
+                u = current_nominal_action
+                self.simulator.x0 = x
+
+                # Track nominal state/action locally so they can be updated per step
+                step_nominal_state = current_nominal_state
+                step_nominal_action = current_nominal_action
+
+                # propagate dynamics
+                for t_step in range(n_steps):
+                    u_applied = step_nominal_action + self.K @ (
+                        x.T.reshape(
+                            -1, 1
                         )
-                        x_next = self.simulator.make_step(u0=u_applied)
-                        
-                        # calculate tracking cost
-                        tracking_cost = self._compute_tracking_cost_metric(
-                            self._extract_physical_state(trajectory.obs[t + t_step]), x, trajectory.acts[t + t_step], u_applied, t + t_step
+                        - step_nominal_state.reshape(
+                            -1, 1
                         )
-                        # calculate margin to safety violation
-                        margin_safety = self._compute_margin_safety_violation(x)
-                        x = x_next
+                    )
+                    x_next = self.simulator.make_step(u0=u_applied)
+                    
+                    # calculate tracking cost
+                    tracking_cost = self._compute_tracking_cost_metric(
+                        self._extract_physical_state(trajectory.obs[t + t_step]), x, trajectory.acts[t + t_step], u_applied, t + t_step
+                    )
+                    # calculate margin to safety violation
+                    margin_safety = self._compute_margin_safety_violation(x)
+                    x = x_next
 
-                        if reference_states is not None:
-                            x_next = np.concatenate((x_next, reference_states[t + t_step].reshape(-1, 1)), axis=0)
-                        
-                        builder.add_step(
-                            action=u_applied.flatten(),
-                            next_obs=x_next.flatten(),
-                            reward=0.0,
-                            info={
-                                "tracking_cost": tracking_cost,
-                                "margin_safety": margin_safety,
-                                "noise_level": current_noise_level,
-                                "total_applied_noise_sum": total_applied_noise_sum,
-                            },
-                        )
-
-                        current_nominal_state = trajectory.obs[t + t_step]
-                        current_nominal_action = trajectory.acts[t + t_step]
-
-                    # finalize trajectory
-                    traj = builder.finish(terminal=True)
-
-                    augmented_trajs_t.append(traj)
-
-                    augmented_infos.append(
-                        {
-                            "original_timestep": t,
-                            "augmentation_method": "robust_tube_mpc",
-                        }
+                    if reference_states is not None:
+                        x_next = np.concatenate((x_next, reference_states[t + t_step].reshape(-1, 1)), axis=0)
+                    
+                    builder.add_step(
+                        action=u_applied.flatten(),
+                        next_obs=x_next.flatten(),
+                        reward=0.0,
+                        info={
+                            "tracking_cost": tracking_cost,
+                            "margin_safety": margin_safety,
+                            "noise_level": current_noise_level,
+                            "total_applied_noise_sum": total_applied_noise_sum,
+                        },
                     )
 
-                augmented_trajs.extend(augmented_trajs_t)
+                    step_nominal_state = trajectory.obs[t + t_step]
+                    step_nominal_action = trajectory.acts[t + t_step]
+
+                # finalize trajectory
+                traj = builder.finish(terminal=True)
+
+                augmented_trajs_t.append(traj)
+
+                augmented_infos.append(
+                    {
+                        "original_timestep": t,
+                        "augmentation_method": "robust_tube_mpc",
+                    }
+                )
+
+            augmented_trajs.extend(augmented_trajs_t)
 
         # Restore simulator time so this call is non-destructive to episode state.
         self.simulator.t0 = _saved_sim_t0

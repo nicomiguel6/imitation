@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Union
 
 import numpy as np
+from matplotlib import pyplot as plt
 
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.scripts.NTRIL.double_integrator.double_integrator import (
@@ -260,7 +261,7 @@ def main():
     SCRIPT_DIR = Path(__file__).parent.resolve()
     SAVE_DIR = SCRIPT_DIR / "drex_outputs"
 
-    run_drex_training(
+    drex_trainer = run_drex_training(
         env_id="imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0",
         env_options={"max_episode_seconds": 200.0, "dt": 1.0},
         save_dir=str(SAVE_DIR),
@@ -268,8 +269,20 @@ def main():
         n_rollouts_per_noise=5,
         n_ensemble=3,
         rl_total_timesteps=1_000_000,
-        retrain="all",
+        retrain=None,
     )
+
+    # Plot noisy rollouts
+    for rollouts in drex_trainer.noisy_rollouts:   
+        rollout = rollouts[0]
+        fig, ax = plt.subplots()
+        ax.plot(rollout.obs[:, 0])
+        ax.legend()
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Position")
+        ax.set_title(f"DREX Noisy Rollouts at Noise Level {rollout.infos[0]['noise_level']:.2f}")
+        plt.savefig(os.path.join(SAVE_DIR, f"drex_noisy_rollouts_{rollout.infos[0]['noise_level']:.2f}.png"))
+        plt.close(fig)
 
     print(f"\nAll outputs saved to: {SAVE_DIR}")
 

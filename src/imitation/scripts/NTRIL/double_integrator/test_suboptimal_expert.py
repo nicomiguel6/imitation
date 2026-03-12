@@ -34,8 +34,8 @@ def main():
     env_suboptimal = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=0.1, reference_trajectory = reference_trajectory)
 
     # # load final policy
-    # final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
-    # final_policy = PPO.load(final_policy_path, device="cuda")
+    final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
+    final_policy = PPO.load(final_policy_path, device="cuda")
 
     # load pure drex policy
     drex_policy_path = SCRIPT_DIR / "drex_outputs" / "final_policy" / "final_policy.zip"
@@ -61,7 +61,7 @@ def main():
         Q=np.diag([10.0, 1.0]),
         R=0.1 * np.eye(1),
         state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds=(np.array([-2.0]), np.array([2.0])),
+        control_bounds=(np.array([-5.0]), np.array([5.0])),
         disturbance_bound = disturbance_magnitude,
         disturbance_vertices = disturbance_vertices,
         reference_trajectory = reference_trajectory_mpc,

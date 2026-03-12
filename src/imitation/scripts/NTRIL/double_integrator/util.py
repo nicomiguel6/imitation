@@ -529,10 +529,12 @@ def measure_ranking_separability(
 
     
     # define reward function using MPC cost
-    Q = np.diag([1.0, 0.0])
+    Q = np.diag([10.0, 1.0])
     def reward_function(states):
         reward_tmp = []
         for state in states:
+            state = state.flatten()
+            state = state[:2]
             reward_tmp.append(-state.T @ Q @ state)
         return np.sum(reward_tmp).flatten()[0] # should be a scalar
     
@@ -623,10 +625,10 @@ if __name__ == "__main__":
             ensemble_dir=args.ensemble_dir,
         )
     else:
-
+        DREX_SAVE_DIR = SCRIPT_DIR / "drex_outputs"
         reference_trajectory = np.load(DEFAULT_SAVE_DIR / "reference_trajectory.npy")
         plot_learned_reward_network(
-            save_dir=DEFAULT_SAVE_DIR,
+            save_dir=DREX_SAVE_DIR,
             device="cpu",
             reference_trajectory=reference_trajectory,
             ref_pos=2.0,

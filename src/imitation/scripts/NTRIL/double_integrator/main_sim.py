@@ -566,6 +566,8 @@ def run_ntril_training(
             base_plot_policy = bc.reconstruct_policy(
                 os.path.join(save_dir, "initial_BC_policy"), device=device
             )
+        
+        # master_rollouts = []
         for noise_level in noise_levels:
             noisy_policy = EpsilonGreedyNoiseInjector().inject_noise(
                 base_plot_policy, noise_level=noise_level
@@ -573,6 +575,18 @@ def run_ntril_training(
             rollouts = rollout.rollout(
                 noisy_policy, venv, rollout.make_sample_until(min_episodes=2), rng=rng
             )
+            # master_rollouts.append(rollouts[0])
+
+        # # Plot all rollouts together
+        # fig, ax = plt.subplots()
+        # for rollouts in master_rollouts:
+        #     # for traj in rollouts:
+        #     ax.plot(rollouts.obs[:, 0])# label=f"Noise {rollouts.infos[0]['noise_level']}")
+        # ax.legend()
+        # ax.set_xlabel("Time")
+        # ax.set_ylabel("Position")
+        # ax.set_title("Noisy Rollouts")
+        # plt.savefig(os.path.join(save_dir, "noisy_rollouts.png"))
             plot_noisy_rollouts(noise_level, rollouts)
 
         return
@@ -619,7 +633,7 @@ def run_ntril_training(
             if suboptimal_policy is None:
                 raise ValueError("Suboptimal policy is required for step 2")
             print("Step 2: Generating noisy rollouts...")
-            _, rollout_stats = ntril_trainer._generate_noisy_rollouts(
+            noisy_rollouts, rollout_stats = ntril_trainer._generate_noisy_rollouts(
                 force_retrain="rollouts" in _force_set,
                 # reference_trajectory=reference_trajectory_mpc,
             )
@@ -684,7 +698,7 @@ def run_ntril_training(
     return ntril_trainer
 
 
-def plot_noisy_rollouts(noise_level, noisy_rollouts, max_rollouts_per_level: int = 2):
+def plot_noisy_rollouts(noise_level, noisy_rollouts, max_rollouts_per_level: int = 8):
     """Plot a few rollouts for each noise level, on separate figures."""
     print("Plotting noisy rollouts...")
     fig, ax = plt.subplots()
@@ -700,11 +714,10 @@ def plot_noisy_rollouts(noise_level, noisy_rollouts, max_rollouts_per_level: int
     # plot as timeseries of position vs time
     for traj in noisy_rollouts[:max_rollouts_per_level]:
         ax.plot(traj.obs[:, 0], label=f"Noise {noise_level}")
-        ax.grid(True)
         ax.set_xlabel("Time")
         ax.set_ylabel("Position")
         ax.set_title(f"Timeseries of Position for Noisy Rollouts at Noise Level {noise_level:.2f}")
-        ax.legend()
+        # ax.legend()
 
     save_dir = "debug/plots/noisy_rollouts"
     os.makedirs(save_dir, exist_ok=True)
@@ -943,8 +956,8 @@ def main():
             noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
             n_rollouts_per_noise=5,
             rl_total_timesteps=1_000_000,
-            run_individual_steps=[2,3,4,5,6],
-            retrain=["rl"],
+            run_individual_steps=[2],
+            retrain=["rollouts"],
             just_plot_noisy_rollouts=False,
             robust_mpc=robust_tube_mpc,
             reference_trajectory=reference_trajectory,
@@ -953,7 +966,7 @@ def main():
 
 
 
-    # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
+    # # Plot an instance of a nominal noisy rollout vs rtmpc trajectory for each noise level
     # mpc_plot_dir = SCRIPT_DIR / "debug" / "plots" / "mpc"
     # mpc_plot_dir.mkdir(parents=True, exist_ok=True)
     # for idx, noise_level in enumerate(ntril_trainer.noise_levels):
@@ -974,20 +987,31 @@ def main():
     #     plt.close()
     #     print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
 
-    # Plot RTMPC trajectory and augmented data for a noise level
-    noise_level = 0.0
-    rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[0][0] # one trajectory at noise level 0.0
-    augmented_data = ntril_trainer.augmented_data[0][:5] # first 10 augmented trajectories at noise level 0.0  
-    fig, ax = plt.subplots()
-    ax.plot(rtmpc_trajectory.obs[:, 0], color="blue", label="RTMPC Trajectory")
-    for i, traj in enumerate(augmented_data):
-        label = "Augmented Data" if i == 0 else None
-        ax.plot(traj.obs[:, 0], color="red", label=label)
-    ax.legend()
-    # make directory if it doesn't exist
-    augmented_plots_dir = SCRIPT_DIR / "debug" / "plots" / "augmented_plots"
-    augmented_plots_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(augmented_plots_dir / f"rtmpc_trajectory_{noise_level}.png")
+    # # Plot RTMPC trajectory and augmented data for a noise level
+    # augmented_plots_dir = SCRIPT_DIR / "debug" / "plots" / "augmented_plots"
+    # augmented_plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # for idx, noise_level in enumerate(ntril_trainer.noise_levels):
+    #     # Use the first RTMPC trajectory and all augmented data for each noise level
+    #     rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]  # one trajectory at this noise level
+    #     if noise_level == 0.0:
+    #         augmented_data = ntril_trainer.augmented_data[idx]           # augmented trajectories at this noise level
+    #     else:
+    #         # choose 10 random augmented trajectories at this noise level   
+    #         chosen_indices = np.random.choice(len(ntril_trainer.augmented_data[idx]), 10, replace=False)
+    #         augmented_data = [ntril_trainer.augmented_data[idx][int(i)] for i in chosen_indices]
+
+    #     fig, ax = plt.subplots()
+    #     ax.plot(rtmpc_trajectory.obs[:, 0], color="blue", label="RTMPC Trajectory")
+    #     for i, traj in enumerate(augmented_data):
+    #         label = "Augmented Data" if i == 0 else None
+    #         ax.plot(traj.obs[:, 0], color="red", label=label)
+    #     ax.legend()
+    #     ax.set_xlabel("Time")
+    #     ax.set_ylabel("Position")
+    #     ax.set_title(f"RTMPC Trajectory and Augmented Data at Noise Level {noise_level:.2f}")
+    #     plt.savefig(augmented_plots_dir / f"rtmpc_trajectory_{noise_level:.2f}.png")
+    #     plt.close(fig)
 
 
     # # Step 3: Evaluate the trained policy

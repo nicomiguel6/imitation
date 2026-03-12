@@ -497,7 +497,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
                 # Augment from nominal trajectory to get augmented trajectories
                 augmented_trajectories = self.robust_mpc.augment_trajectory(
-                    rtmpc_trajectory_phys, reference_states=original_reference_states
+                    rtmpc_trajectory_phys, reference_states=original_reference_states, simulate_to_end=True
                 )
                 augmented_data_for_noise_level.extend(augmented_trajectories)
             
@@ -563,7 +563,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 demonstrations=data_source,
                 num_snippets=5_000,
                 min_segment_length=5,
-                max_segment_length=30,
+                max_segment_length=200,
                 rng=np.random.default_rng(i),
             )
             th.save(
