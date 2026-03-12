@@ -892,7 +892,6 @@ def main():
         horizon = 10,
         time_step = dt,
         disturbance_bound = 0.1,
-        tube_radius = 0.05,
         A = ghost_env.A_d,
         B = ghost_env.B_d,
         Q = np.diag([10.0, 1.0]),

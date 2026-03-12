@@ -46,6 +46,7 @@ class RobustTubeMPC:
         finite_diff_eps: float = 1e-6,
         initial_state: Optional[np.ndarray] = None,
         reference_trajectory: Optional[types.Trajectory] = None,
+        use_approx: bool = False,
     ):
         """Initialize Robust Tube MPC.
 
@@ -73,7 +74,7 @@ class RobustTubeMPC:
         # Handle defaults for disturbance_bound and tube_radius if not given
         self.disturbance_bound = disturbance_bound
         self.tube_radius = tube_radius
-
+        self.use_approx = use_approx
         # Ensure that A and B matrices are provided
         if A is None or B is None:
             raise ValueError("System dynamic matrices A and B must be provided.")
@@ -172,13 +173,15 @@ class RobustTubeMPC:
             self.disturbance_polytope = pytope.Polytope(self.disturbance_vertices)
 
             # Compute mrpi set
-            # self.A_F, self.b_F = compute_mrpi_hrep(
-            #     self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b
-            # )
-            # self.Z = pytope.Polytope(self.A_F, self.b_F)
-            self.Z = compute_approximate_linear_mrpi(self, disturbance_magnitude=self.disturbance_bound)
-            self.A_F = self.Z.A
-            self.b_F = self.Z.b
+            if self.use_approx:
+                self.Z = compute_approximate_linear_mrpi(self, disturbance_magnitude=self.disturbance_bound)
+                self.A_F = self.Z.A
+                self.b_F = self.Z.b
+            else:
+                self.A_F, self.b_F = compute_mrpi_hrep(
+                self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b
+            )
+                self.Z = pytope.Polytope(self.A_F, self.b_F)
 
             # Tighten state and constraint bounds accordingly
             if self.state_bounds is not None:
@@ -945,7 +948,7 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
         if not all_inside:
             for i in range(internal_state_dim):
                 box_size = initial_mrpis[i][1] - initial_mrpis[i][0]
-                margin = 0.05 * max(box_size, 1e-6)
+                margin = 0.01 * max(box_size, 1e-6)
                 initial_mrpis[i][0] = min(initial_mrpis[i][0], worst_low[i] - margin)
                 initial_mrpis[i][1] = max(initial_mrpis[i][1], worst_high[i] + margin)
             
@@ -1290,6 +1293,7 @@ if __name__ == "__main__": # test code
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
         control_bounds = (np.array([-2.0]), np.array([2.0])),
         reference_trajectory = reference_trajectory_mpc,
+        use_approx = True,
     )
 
     # set up identical robust tube MPC for internal usage
@@ -1305,6 +1309,7 @@ if __name__ == "__main__": # test code
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
         control_bounds = (np.array([-2.0]), np.array([2.0])),
         reference_trajectory = reference_trajectory_mpc,
+        use_approx = True,
     )
 
     robust_mpc.setup()
