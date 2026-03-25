@@ -18,7 +18,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 
 def main():
     # Simulation params
-    disturbance_magnitude = 0.1
+    disturbance_magnitude = 0
     disturbance_vertices = np.array([[disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, -disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude], [disturbance_magnitude, -disturbance_magnitude]])
     dt = 1.0
     max_episode_seconds = 200
@@ -29,13 +29,13 @@ def main():
     reference_trajectory_mpc = types.Trajectory(obs=reference_trajectory, acts=np.zeros((max_episode_steps, 1)), infos=np.array([{}] * max_episode_steps), terminal=True)
     
     # Set up envs
-    env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=0.1, reference_trajectory=reference_trajectory)
-    env_policy = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=0.1, reference_trajectory=reference_trajectory)
-    env_suboptimal = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=0.1, reference_trajectory = reference_trajectory)
+    env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=disturbance_magnitude, reference_trajectory=reference_trajectory)
+    env_policy = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=disturbance_magnitude, reference_trajectory=reference_trajectory)
+    env_suboptimal = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=disturbance_magnitude, reference_trajectory = reference_trajectory)
 
     # # load final policy
-    final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
-    final_policy = PPO.load(final_policy_path, device="cuda")
+    # final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
+    # final_policy = PPO.load(final_policy_path, device="cuda")
 
     # load pure drex policy
     drex_policy_path = SCRIPT_DIR / "drex_outputs" / "final_policy" / "final_policy.zip"
@@ -62,8 +62,8 @@ def main():
         R=0.1 * np.eye(1),
         state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
         control_bounds=(np.array([-5.0]), np.array([5.0])),
-        disturbance_bound = disturbance_magnitude,
-        disturbance_vertices = disturbance_vertices,
+        # disturbance_bound = disturbance_magnitude,
+        # disturbance_vertices = disturbance_vertices,
         reference_trajectory = reference_trajectory_mpc,
     )
     mpc_policy.setup()
@@ -72,7 +72,7 @@ def main():
     K = [0.02, 0.3]
     suboptimal_policy.set_K_values(K[0], K[1])
 
-    initial_state = np.random.uniform(-5.0, 5.0, size=(2,)).astype(np.float32)
+    initial_state = np.random.uniform(-2.0, 2.0, size=(2,)).astype(np.float32)
 
     for j in range(1):
         obs, info = env_policy.reset(state=initial_state, options={"reference_trajectory": reference_trajectory})

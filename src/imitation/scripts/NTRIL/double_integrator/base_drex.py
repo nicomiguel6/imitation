@@ -269,7 +269,7 @@ def main():
         n_rollouts_per_noise=5,
         n_ensemble=3,
         rl_total_timesteps=1_000_000,
-        retrain=None,
+        retrain=['ranking', 'irl', 'rl'],
     )
 
     # Plot noisy rollouts

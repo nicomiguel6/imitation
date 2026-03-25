@@ -1270,7 +1270,7 @@ def compute_mrpi_hrep(Ak, W_A, W_b, epsilon=1e-4, max_iter=500):
 if __name__ == "__main__": # test code
     import matplotlib.pyplot as plt
 
-    disturbance_magnitude = 0.1
+    disturbance_magnitude = 0
     disturbance_vertices = np.array([[disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, -disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude], [disturbance_magnitude, -disturbance_magnitude]])
     
     dt = 1.0
@@ -1288,10 +1288,10 @@ if __name__ == "__main__": # test code
         B = env.B_d,
         Q = np.diag([10.0, 1.0]),
         R = 0.1*np.eye(1),
-        disturbance_bound = disturbance_magnitude,
-        disturbance_vertices = disturbance_vertices,
+        # disturbance_bound = disturbance_magnitude,
+        # disturbance_vertices = disturbance_vertices,
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-2.0]), np.array([2.0])),
+        control_bounds = (np.array([-5.0]), np.array([5.0])),
         reference_trajectory = reference_trajectory_mpc,
         use_approx = True,
     )
@@ -1304,10 +1304,10 @@ if __name__ == "__main__": # test code
         B = env.B_d,
         Q = np.diag([10.0, 1.0]),
         R = 0.1*np.eye(1),
-        disturbance_bound = disturbance_magnitude,
-        disturbance_vertices = disturbance_vertices,
+        # disturbance_bound = disturbance_magnitude,
+        # disturbance_vertices = disturbance_vertices,
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-2.0]), np.array([2.0])),
+        control_bounds = (np.array([-5.0]), np.array([5.0])),
         reference_trajectory = reference_trajectory_mpc,
         use_approx = True,
     )
@@ -1319,7 +1319,7 @@ if __name__ == "__main__": # test code
     # approximate_linear_mrpi = compute_approximate_linear_mrpi(robust_mpc, disturbance_magnitude=disturbance_magnitude)
 
     # Run MPC for 100 steps and plot
-    initial_state = np.array([-5.0, 5.0], dtype=np.float32)
+    initial_state = np.array([-5.0, -2.0], dtype=np.float32)
     obs, info = env.reset(
         state=initial_state,
         options={"reference_trajectory": reference_trajectory},
@@ -1369,11 +1369,11 @@ if __name__ == "__main__": # test code
 
     # Plot state trajectories (position and velocity)
     axs[0].plot(np.array(states)[:, 0], 'r', label="Position (env)")
-    axs[0].plot(np.array(states)[:, 1], 'b', label="Velocity (env)")
+    # axs[0].plot(np.array(states)[:, 1], 'b', label="Velocity (env)")
     axs[0].plot(np.array(states_internal)[:, 0], color="#FF7F7F", label="Position (internal)")
-    axs[0].plot(np.array(states_internal)[:, 1], color="#7FBFFF", label="Velocity (internal)")
+    #axs[0].plot(np.array(states_internal)[:, 1], color="#7FBFFF", label="Velocity (internal)")
     axs[0].plot(reference_trajectory[:, 0], 'r-.', label="Reference Position")
-    axs[0].plot(reference_trajectory[:, 1], 'b-.', label="Reference Velocity")
+    #axs[0].plot(reference_trajectory[:, 1], 'b-.', label="Reference Velocity")
     axs[0].axhline(y=-10.0, color="k", linestyle="--", linewidth=1)
     axs[0].axhline(y=10.0, color="k", linestyle="--", linewidth=1)
     axs[0].set_ylabel("State")

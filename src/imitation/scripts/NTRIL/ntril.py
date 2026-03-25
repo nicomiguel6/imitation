@@ -337,7 +337,8 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 "BC policy must be trained/loaded before generating noisy rollouts"
             )
 
-        noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
+        # noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
+        noisy_rollouts_path = '/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_rollouts.pkl'
         if os.path.exists(noisy_rollouts_path) and not force_retrain:
             print("Loading existing noisy rollouts...")
             with open(noisy_rollouts_path, "rb") as f:
