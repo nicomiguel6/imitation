@@ -897,9 +897,10 @@ def main():
         Q = np.diag([10.0, 1.0]),
         R = 0.1*np.eye(1),
         disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
-        state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-2.0]), np.array([2.0])),
+        state_bounds = (np.array([-8.0, -8.0]), np.array([12.0, 12.0])),
+        control_bounds = (np.array([-5.0]), np.array([5.0])),
         reference_trajectory = reference_trajectory_mpc,
+        use_approx = True,
     )
 
     robust_tube_mpc.setup()
@@ -955,8 +956,8 @@ def main():
             noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
             n_rollouts_per_noise=5,
             rl_total_timesteps=1_000_000,
-            run_individual_steps=[2],
-            retrain=["rollouts"],
+            run_individual_steps=[5, 6],
+            retrain=["rl"],
             just_plot_noisy_rollouts=False,
             robust_mpc=robust_tube_mpc,
             reference_trajectory=reference_trajectory,
@@ -986,31 +987,31 @@ def main():
     #     plt.close()
     #     print(f"Plotted nominal noisy rollout vs rtmpc trajectory for noise level {noise_level:.2f}")
 
-    # # Plot RTMPC trajectory and augmented data for a noise level
-    # augmented_plots_dir = SCRIPT_DIR / "debug" / "plots" / "augmented_plots"
-    # augmented_plots_dir.mkdir(parents=True, exist_ok=True)
+    # Plot RTMPC trajectory and augmented data for a noise level
+    augmented_plots_dir = SCRIPT_DIR / "debug" / "plots" / "augmented_plots"
+    augmented_plots_dir.mkdir(parents=True, exist_ok=True)
 
-    # for idx, noise_level in enumerate(ntril_trainer.noise_levels):
-    #     # Use the first RTMPC trajectory and all augmented data for each noise level
-    #     rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]  # one trajectory at this noise level
-    #     if noise_level == 0.0:
-    #         augmented_data = ntril_trainer.augmented_data[idx]           # augmented trajectories at this noise level
-    #     else:
-    #         # choose 10 random augmented trajectories at this noise level   
-    #         chosen_indices = np.random.choice(len(ntril_trainer.augmented_data[idx]), 10, replace=False)
-    #         augmented_data = [ntril_trainer.augmented_data[idx][int(i)] for i in chosen_indices]
+    for idx, noise_level in enumerate(ntril_trainer.noise_levels):
+        # Use the first RTMPC trajectory and all augmented data for each noise level
+        rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]  # one trajectory at this noise level
+        if noise_level == 0.0:
+            augmented_data = ntril_trainer.augmented_data[idx]           # augmented trajectories at this noise level
+        else:
+            # choose 10 random augmented trajectories at this noise level   
+            chosen_indices = np.random.choice(len(ntril_trainer.augmented_data[idx]), 10, replace=False)
+            augmented_data = [ntril_trainer.augmented_data[idx][int(i)] for i in chosen_indices]
 
-    #     fig, ax = plt.subplots()
-    #     ax.plot(rtmpc_trajectory.obs[:, 0], color="blue", label="RTMPC Trajectory")
-    #     for i, traj in enumerate(augmented_data):
-    #         label = "Augmented Data" if i == 0 else None
-    #         ax.plot(traj.obs[:, 0], color="red", label=label)
-    #     ax.legend()
-    #     ax.set_xlabel("Time")
-    #     ax.set_ylabel("Position")
-    #     ax.set_title(f"RTMPC Trajectory and Augmented Data at Noise Level {noise_level:.2f}")
-    #     plt.savefig(augmented_plots_dir / f"rtmpc_trajectory_{noise_level:.2f}.png")
-    #     plt.close(fig)
+        fig, ax = plt.subplots()
+        ax.plot(rtmpc_trajectory.obs[:, 0], color="blue", label="RTMPC Trajectory")
+        for i, traj in enumerate(augmented_data):
+            label = "Augmented Data" if i == 0 else None
+            ax.plot(traj.obs[:, 0], color="red", label=label)
+        ax.legend()
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Position")
+        ax.set_title(f"RTMPC Trajectory and Augmented Data at Noise Level {noise_level:.2f}")
+        plt.savefig(augmented_plots_dir / f"rtmpc_trajectory_{noise_level:.2f}.png")
+        plt.close(fig)
 
 
     # # Step 3: Evaluate the trained policy

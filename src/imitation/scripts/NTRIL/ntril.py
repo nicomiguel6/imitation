@@ -337,8 +337,8 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 "BC policy must be trained/loaded before generating noisy rollouts"
             )
 
-        # noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
-        noisy_rollouts_path = '/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_rollouts.pkl'
+        noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
+        # noisy_rollouts_path = '/home/nicomiguel/imitation/src/imitation/scripts/NTRIL/double_integrator/ntril_outputs/noisy_rollouts.pkl'
         if os.path.exists(noisy_rollouts_path) and not force_retrain:
             print("Loading existing noisy rollouts...")
             with open(noisy_rollouts_path, "rb") as f:
@@ -464,18 +464,34 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         self.rtmpc_trajectories = []
         self.augmented_data = []
 
-        # Check if augmented data and rtmpc trajectories already exists in the save directory
+        # Check if augmented data and rtmpc trajectories already exist in save directory
         augmented_data_path = os.path.join(self.save_dir, "augmented_data")
         rtmpc_trajectories_path = os.path.join(self.save_dir, "rtmpc_trajectories")
-        if os.path.exists(augmented_data_path) and os.path.exists(rtmpc_trajectories_path) and not force_retrain:
+
+        data_exists = (
+            os.path.exists(augmented_data_path) and 
+            os.path.exists(rtmpc_trajectories_path) and 
+            not force_retrain
+        )
+
+        if data_exists:
             for noise_level in self.noise_levels:
-                augmented_data_for_noise_level_path = os.path.join(augmented_data_path, f"noise_{noise_level:.2f}.pkl")
-                rtmpc_trajectories_for_noise_level_path = os.path.join(rtmpc_trajectories_path, f"noise_{noise_level:.2f}.pkl")
-                if os.path.exists(augmented_data_for_noise_level_path) and os.path.exists(rtmpc_trajectories_for_noise_level_path):
-                    augmented_data_for_noise_level = serialize.load(augmented_data_for_noise_level_path)
-                    rtmpc_trajectories_for_noise_level = serialize.load(rtmpc_trajectories_for_noise_level_path)
-                    self.augmented_data.append(augmented_data_for_noise_level)
-                    self.rtmpc_trajectories.append(rtmpc_trajectories_for_noise_level)
+                aug_path = os.path.join(
+                    augmented_data_path, f"noise_{noise_level:.2f}.pkl"
+                )
+                rtmpc_path = os.path.join(
+                    rtmpc_trajectories_path, f"noise_{noise_level:.2f}.pkl"
+                )
+                
+                if os.path.exists(aug_path) and os.path.exists(rtmpc_path):
+                    # Load augmented data
+                    augmented_data = serialize.load(aug_path)
+                    # Load rtmpc trajectories
+                    rtmpc_trajectories = serialize.load(rtmpc_path)
+                    
+                    self.augmented_data.append(augmented_data)
+                    self.rtmpc_trajectories.append(rtmpc_trajectories)
+
             return self.augmented_data, self.rtmpc_trajectories
 
 
@@ -498,7 +514,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
                 # Augment from nominal trajectory to get augmented trajectories
                 augmented_trajectories = self.robust_mpc.augment_trajectory(
-                    rtmpc_trajectory_phys, reference_states=original_reference_states, simulate_to_end=True
+                    rtmpc_trajectory_phys, reference_states=original_reference_states
                 )
                 augmented_data_for_noise_level.extend(augmented_trajectories)
             
@@ -564,7 +580,7 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
                 demonstrations=data_source,
                 num_snippets=5_000,
                 min_segment_length=5,
-                max_segment_length=200,
+                max_segment_length=30,
                 rng=np.random.default_rng(i),
             )
             th.save(

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
 from stable_baselines3 import PPO
-from imitation.scripts.NTRIL.double_integrator.double_integrator import DoubleIntegratorSuboptimalPolicy
+from imitation.scripts.NTRIL.double_integrator.double_integrator import DoubleIntegratorSuboptimalPolicy, generate_reference_trajectory
 from imitation.data import types
 
 
@@ -18,14 +18,15 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 
 def main():
     # Simulation params
-    disturbance_magnitude = 0
+    disturbance_magnitude = 0.1
     disturbance_vertices = np.array([[disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, -disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude], [disturbance_magnitude, -disturbance_magnitude]])
     dt = 1.0
     max_episode_seconds = 200
 
     max_episode_steps = int(max_episode_seconds / dt)
     # Set up reference trajectory
-    reference_trajectory = np.load(SCRIPT_DIR / "ntril_outputs" / "reference_trajectory.npy")
+    # reference_trajectory = np.load(SCRIPT_DIR / "ntril_outputs" / "reference_trajectory.npy")
+    reference_trajectory = generate_reference_trajectory(T=max_episode_steps, dt=dt, mode="constant", target_position=2.0)
     reference_trajectory_mpc = types.Trajectory(obs=reference_trajectory, acts=np.zeros((max_episode_steps, 1)), infos=np.array([{}] * max_episode_steps), terminal=True)
     
     # Set up envs
@@ -33,13 +34,13 @@ def main():
     env_policy = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=disturbance_magnitude, reference_trajectory=reference_trajectory)
     env_suboptimal = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=disturbance_magnitude, reference_trajectory = reference_trajectory)
 
-    # # load final policy
-    # final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
-    # final_policy = PPO.load(final_policy_path, device="cuda")
+    # load final policy
+    final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
+    final_policy = PPO.load(final_policy_path, device="cuda")
 
-    # load pure drex policy
-    drex_policy_path = SCRIPT_DIR / "drex_outputs" / "final_policy" / "final_policy.zip"
-    final_policy = PPO.load(drex_policy_path, device="cuda")
+    # # load pure drex policy
+    # drex_policy_path = SCRIPT_DIR / "drex_outputs" / "final_policy" / "final_policy.zip"
+    # final_policy = PPO.load(drex_policy_path, device="cuda")
 
     # Suboptimal policy
     suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
@@ -60,10 +61,10 @@ def main():
         B=env_mpc.B_d,
         Q=np.diag([10.0, 1.0]),
         R=0.1 * np.eye(1),
-        state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
+        state_bounds=(np.array([-8.0, -8.0]), np.array([12.0, 12.0])),
         control_bounds=(np.array([-5.0]), np.array([5.0])),
-        # disturbance_bound = disturbance_magnitude,
-        # disturbance_vertices = disturbance_vertices,
+        disturbance_bound = disturbance_magnitude,
+        disturbance_vertices = disturbance_vertices,
         reference_trajectory = reference_trajectory_mpc,
     )
     mpc_policy.setup()

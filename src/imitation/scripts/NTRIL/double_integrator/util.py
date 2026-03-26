@@ -625,14 +625,15 @@ if __name__ == "__main__":
             ensemble_dir=args.ensemble_dir,
         )
     else:
-        DREX_SAVE_DIR = SCRIPT_DIR / "drex_outputs"
-        # reference_trajectory = np.load(DEFAULT_SAVE_DIR / "reference_trajectory.npy")
-        # plot_learned_reward_network(
-        #     save_dir=DREX_SAVE_DIR,
-        #     device="cpu",
-        #     reference_trajectory=reference_trajectory,
-        #     ref_pos=2.0,
-        #     ref_vel=0.0,
-        # )
-        measure_ranking_separability()
+        # DREX_SAVE_DIR = SCRIPT_DIR / "drex_outputs"
+        # NTRIL_SAVE_DIR = SCRIPT_DIR / "ntril_outputs"
+        reference_trajectory = np.load(DEFAULT_SAVE_DIR / "reference_trajectory.npy")
+        plot_learned_reward_network(
+            save_dir=DEFAULT_SAVE_DIR,
+            device="cpu",
+            reference_trajectory=reference_trajectory,
+            ref_pos=2.0,
+            ref_vel=0.0,
+        )
+        # measure_ranking_separability()
         # _build_parser().print_help()

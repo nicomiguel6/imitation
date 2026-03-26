@@ -3,6 +3,7 @@
 import abc
 from typing import Any, Dict, List, Optional, Tuple, Union, Sequence
 from itertools import product
+import os
 
 import gymnasium as gym
 import numpy as np
@@ -13,6 +14,8 @@ import casadi as ca
 import do_mpc
 import cdd
 import pytope
+
+from matplotlib import pyplot as plt
 
 from imitation.data import types
 from imitation.policies.base import NonTrainablePolicy
@@ -678,6 +681,29 @@ class RobustTubeMPC:
 
             augmented_trajs.extend(augmented_trajs_t)
 
+            # # FOR DEBUG PURPOSES: PLOT SAMPLES, ADJUSTED SET, AND CURRENT NOMINAL STATE
+            # fig, ax = plt.subplots()
+            # ts = np.array(samples)
+            # ax.plot(ts[:, 0], ts[:, 1], 'r+', label="Samples")
+            # ax.plot(approx_tube.V[:, 0], approx_tube.V[:, 1], 'k+', label="Adjusted Set")
+            # ax.plot(current_nominal_state[0], current_nominal_state[1], 'ro', label="Current Nominal State")
+            # ax.legend()
+            # os.makedirs("imitation/scripts/NTRIL/debug/double_integrator/debug/plots/samples", exist_ok=True)
+            # plt.savefig(os.path.join("imitation/scripts/NTRIL/debug/double_integrator/debug/plots/samples", f"samples_and_adjusted_set_{t}.png"))
+            # plt.close()
+
+            # # FOR DEBUG PURPOSES: PLOT CURRENT REFERENCE NOISY ROLLOUT AND ALL AUGMENTATIONS FOR EACH TIMESTEP
+            # fig, ax = plt.subplots()
+            # ax.plot(trajectory.obs[:, 0], label="Reference Noisy Rollout")
+            # timespan = np.arange(t*self.time_step, (t+n_steps+1)*self.time_step, self.time_step)
+            # for traj in augmented_trajs_t:
+            #     ax.plot(timespan, traj.obs[:, 0], label="Augmentation")
+            # ax.legend()
+            # os.makedirs("imitation/scripts/NTRIL/debug/double_integrator/debug/plots/augmented_trajectories", exist_ok=True)
+            # plt.savefig(os.path.join("imitation/scripts/NTRIL/debug/double_integrator/debug/plots/augmented_trajectories", f"augmented_trajectory_{t}.png"))
+            # plt.close()
+        
+        
         # Restore simulator time so this call is non-destructive to episode state.
         self.simulator.t0 = _saved_sim_t0
 
@@ -1086,8 +1112,13 @@ def get_samples(
                 if j_dim == i_dim:
                     continue
 
-                samples.append(np.array([midpoints[i_dim], minpoints[j_dim]]))
-                samples.append(np.array([midpoints[i_dim], maxpoints[j_dim]]))
+                sample_min = np.array(midpoints.copy())
+                sample_min[j_dim] = minpoints[j_dim]
+                samples.append(sample_min)
+
+                sample_max = np.array(midpoints.copy())
+                sample_max[j_dim] = maxpoints[j_dim]
+                samples.append(sample_max)
 
     return samples
 
