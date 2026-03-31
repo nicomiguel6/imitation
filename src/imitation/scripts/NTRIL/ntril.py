@@ -5,6 +5,7 @@ import json
 import pickle
 import logging
 import os
+from tqdm import tqdm
 from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Dict, Mapping, Optional, Sequence, Union, List
@@ -494,13 +495,12 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
             return self.augmented_data, self.rtmpc_trajectories
 
-
-        for noise_idx, rollouts in enumerate(self.noisy_rollouts):
+        for noise_idx, rollouts in enumerate(tqdm(self.noisy_rollouts, desc="Augmenting per noise level")):
             noise_level = self.noise_levels[noise_idx]
             augmented_data_for_noise_level = []
             rtmpc_trajectories_for_noise_level = []
 
-            for traj_idx, traj in enumerate(rollouts):
+            for traj_idx, traj in enumerate(tqdm(rollouts, desc="Augmenting per trajectory")): 
                 # Extract physical state from trajectory
                 traj_parsed = self._parse_trajectory(traj)
                 # Extract original reference trajectory

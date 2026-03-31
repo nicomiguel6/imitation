@@ -14,6 +14,7 @@ Date: December 2025
 """
 
 import argparse
+from datetime import datetime
 import os
 from pathlib import Path
 import functools
@@ -211,7 +212,7 @@ def train_BC_on_MPC_demonstrations(
     venv = util.make_vec_env(
         env_id,
         rng=rng,
-        n_envs=8,
+        n_envs=5,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
     )
 
@@ -299,7 +300,7 @@ def generate_expert_demonstrations(
     venv = util.make_vec_env(
         env_id,
         rng=rng,
-        n_envs=8,
+        n_envs=5,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
     )
 
@@ -503,7 +504,7 @@ def run_ntril_training(
     venv = util.make_vec_env(
         env_id,
         rng=rng,
-        n_envs=8,
+        n_envs=5,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
         env_make_kwargs=env_options,
     )
@@ -788,7 +789,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--run-individual-steps", type=list, default=[1,2,3,4,5,6])
     sp.add_argument("--retrain", type=list, default=None)
     sp.add_argument("--just-plot-noisy-rollouts", type=bool, default=False)
-    sp.add_argument("--archive-name", type=str, default=str(Path(__file__).parent.resolve() / "ntril_outputs"/ "archived_runs"/ "run_v1"))
+    sp.add_argument("--archive-name", type=str, default=None,
+                    help="Name for the archive directory. Defaults to an auto-generated name: <date>_<mode>_A<amp>_f<freq>.")
 
     sp = sub.add_parser("plot-noisy-rollouts", help="Plot the noisy rollouts")
     sp.add_argument("--noise-levels", type=tuple, default=tuple(np.arange(0.0, 1.05, 0.05)))
@@ -797,7 +799,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--run-individual-steps", type=list, default=None)
     sp.add_argument("--retrain", type=list, default=None)
     sp.add_argument("--just-plot-noisy-rollouts", type=bool, default=True)
-    sp.add_argument("--archive-name", type=str, default=str(Path(__file__).parent.resolve() / "ntril_outputs"/ "archived_runs"/ "run_v1"))
+    sp.add_argument("--archive-name", type=str, default=None)
     return p
 
 
@@ -822,20 +824,28 @@ def main():
 
     rngs = np.random.default_rng()
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
-    max_episode_seconds = 200.0
-    dt = 1.0
+    max_episode_seconds = 50.0
+    dt = 0.1
     ghost_env = gym.make(env_id, max_episode_seconds=max_episode_seconds, dt=dt)
 
     # Set up reference trajectory and save
+    ref_mode = "sinusoidal"
+    ref_amplitude = 1.0
+    ref_frequency = 0.01
+    ref_phase = 0.0
     reference_trajectory = generate_reference_trajectory(
         T=ghost_env.max_episode_steps,
         dt=ghost_env.dt,
-        mode="constant",
-        target_position=2.0,
+        mode=ref_mode,
+        amplitude=ref_amplitude,
+        frequency=ref_frequency,
+        phase=ref_phase,
     )
     reference_trajectory_mpc = Trajectory(obs=reference_trajectory, acts=np.zeros((ghost_env.max_episode_steps, 1)), infos=np.array([{}] * ghost_env.max_episode_steps), terminal=True)
     np.save(SAVE_DIR / "reference_trajectory.npy", reference_trajectory)
     print(f"Saved reference trajectory to {SAVE_DIR / 'reference_trajectory.npy'}")
+
+    _auto_archive_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{ref_mode}_A{ref_amplitude}_f{ref_frequency}"
 
     env_options = {"max_episode_seconds": max_episode_seconds, "dt": dt, "reference_trajectory": reference_trajectory}
 
@@ -897,8 +907,8 @@ def main():
         Q = np.diag([10.0, 1.0]),
         R = 0.1*np.eye(1),
         disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
-        state_bounds = (np.array([-8.0, -8.0]), np.array([12.0, 12.0])),
-        control_bounds = (np.array([-5.0]), np.array([5.0])),
+        state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
+        control_bounds = (np.array([-20.0]), np.array([20.0])),
         reference_trajectory = reference_trajectory_mpc,
         use_approx = True,
     )
@@ -927,11 +937,7 @@ def main():
             retrain=args.retrain,
             robust_mpc=robust_tube_mpc,
         )
-        # Archive the reward-net ensemble + final policy under a human-readable name.
-        # Change `archive_name` before each run you want to preserve, then you can
-        # safely re-run with force_retrain without losing the previous results.
-        # The archive lives at: <SAVE_DIR>/archived_runs/<archive_name>/
-        archive_name = args.archive_name
+        archive_name = args.archive_name if args.archive_name else _auto_archive_name
         ntril_trainer.archive_run(
             name=archive_name,
             archive_root=str(SAVE_DIR / "archived_runs"),
@@ -956,11 +962,15 @@ def main():
             noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
             n_rollouts_per_noise=5,
             rl_total_timesteps=1_000_000,
-            run_individual_steps=[5, 6],
-            retrain=["rl"],
+            run_individual_steps=[2,3,4,5,6],
+            retrain=["rollouts", "mpc", "ranking", "irl", "rl"],
             just_plot_noisy_rollouts=False,
             robust_mpc=robust_tube_mpc,
             reference_trajectory=reference_trajectory,
+        )
+        ntril_trainer.archive_run(
+            name=_auto_archive_name,
+            archive_root=str(SAVE_DIR / "archived_runs"),
         )
 
 

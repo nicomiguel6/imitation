@@ -198,8 +198,10 @@ def run_drex_training(
     reference_trajectory = generate_reference_trajectory(
         T=ghost_env.max_episode_steps,
         dt=ghost_env.dt,
-        mode="constant",
-        target_position=2.0,
+        mode="sinusoidal",
+        amplitude=5.0,
+        frequency=0.1,
+        phase=0.0,
     )
 
     env_options["reference_trajectory"] = reference_trajectory
@@ -269,7 +271,7 @@ def main():
         n_rollouts_per_noise=5,
         n_ensemble=3,
         rl_total_timesteps=1_000_000,
-        retrain=['ranking', 'irl'],
+        retrain="all",
     )
 
     # Plot noisy rollouts

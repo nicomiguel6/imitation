@@ -14,6 +14,7 @@ import casadi as ca
 import do_mpc
 import cdd
 import pytope
+import tqdm
 
 from matplotlib import pyplot as plt
 
@@ -577,7 +578,7 @@ class RobustTubeMPC:
 
         n_obs = len(trajectory.obs)
 
-        for t in range(n_obs - 1):
+        for t in tqdm.tqdm(range(n_obs - 1), desc="Augmenting per timestep"):
             # Determine number of simulation steps and eligibility for this timestep.
             if initial_state_only:
                 eligible = t == 0
@@ -1304,11 +1305,11 @@ if __name__ == "__main__": # test code
     disturbance_magnitude = 0
     disturbance_vertices = np.array([[disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, -disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude], [disturbance_magnitude, -disturbance_magnitude]])
     
-    dt = 1.0
+    dt = 0.1
     # Set up double integrator environment
     env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=200.0, dt = dt, disturbance_magnitude=disturbance_magnitude)
     # Set up reference trajectory
-    reference_trajectory = generate_reference_trajectory(T=env.max_episode_steps, dt=dt, mode="constant", target_position=2.0)
+    reference_trajectory = generate_reference_trajectory(T=env.max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.1, phase=0.0)
     reference_trajectory_mpc = types.Trajectory(obs=reference_trajectory, acts=np.zeros((env.max_episode_steps, 1)), infos=np.array([{}] * env.max_episode_steps), terminal=True)
 
     # Set up robust tube MPC for env usage
@@ -1322,7 +1323,7 @@ if __name__ == "__main__": # test code
         # disturbance_bound = disturbance_magnitude,
         # disturbance_vertices = disturbance_vertices,
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-5.0]), np.array([5.0])),
+        control_bounds = (np.array([-20.0]), np.array([20.0])),
         reference_trajectory = reference_trajectory_mpc,
         use_approx = True,
     )
@@ -1338,7 +1339,7 @@ if __name__ == "__main__": # test code
         # disturbance_bound = disturbance_magnitude,
         # disturbance_vertices = disturbance_vertices,
         state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-5.0]), np.array([5.0])),
+        control_bounds = (np.array([-20.0]), np.array([20.0])),
         reference_trajectory = reference_trajectory_mpc,
         use_approx = True,
     )

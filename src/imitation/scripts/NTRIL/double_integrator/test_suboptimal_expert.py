@@ -26,7 +26,7 @@ def main():
     max_episode_steps = int(max_episode_seconds / dt)
     # Set up reference trajectory
     # reference_trajectory = np.load(SCRIPT_DIR / "ntril_outputs" / "reference_trajectory.npy")
-    reference_trajectory = generate_reference_trajectory(T=max_episode_steps, dt=dt, mode="constant", target_position=2.0)
+    reference_trajectory = generate_reference_trajectory(T=max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.01, phase=0.0)
     reference_trajectory_mpc = types.Trajectory(obs=reference_trajectory, acts=np.zeros((max_episode_steps, 1)), infos=np.array([{}] * max_episode_steps), terminal=True)
     
     # Set up envs
@@ -61,8 +61,8 @@ def main():
         B=env_mpc.B_d,
         Q=np.diag([10.0, 1.0]),
         R=0.1 * np.eye(1),
-        state_bounds=(np.array([-8.0, -8.0]), np.array([12.0, 12.0])),
-        control_bounds=(np.array([-5.0]), np.array([5.0])),
+        state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
+        control_bounds=(np.array([-20.0]), np.array([20.0])),
         disturbance_bound = disturbance_magnitude,
         disturbance_vertices = disturbance_vertices,
         reference_trajectory = reference_trajectory_mpc,
