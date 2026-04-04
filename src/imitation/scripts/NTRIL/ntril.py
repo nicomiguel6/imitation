@@ -320,6 +320,11 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             rng=self.rng,
         )
 
+        # Save bc rollouts to file
+        bc_rollouts_path = os.path.join(self.save_dir, "bc_rollouts.pkl")
+        with open(bc_rollouts_path, "wb") as f:
+            pickle.dump(bc_rollouts, f)
+
         return {
             "n_rollouts": len(bc_rollouts),
             "mean_return": np.mean([sum(traj.rews) for traj in bc_rollouts]),

@@ -578,7 +578,7 @@ class RobustTubeMPC:
 
         n_obs = len(trajectory.obs)
 
-        for t in tqdm.tqdm(range(n_obs - 1), desc="Augmenting per timestep"):
+        for t in range(n_obs - 1):
             # Determine number of simulation steps and eligibility for this timestep.
             if initial_state_only:
                 eligible = t == 0

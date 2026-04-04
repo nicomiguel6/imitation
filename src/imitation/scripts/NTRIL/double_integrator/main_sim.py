@@ -40,6 +40,9 @@ from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC, RobustTubeMPC
 from imitation.data.types import TrajectoryWithRew
 from imitation.data.types import Trajectory
 from imitation.scripts.NTRIL.double_integrator.double_integrator import DoubleIntegratorSuboptimalPolicy
+from imitation.scripts.NTRIL.double_integrator.variant_ntril import (
+    run_variant_ntril_training,
+)
 from imitation.policies.base import NonTrainablePolicy
 from imitation.scripts.NTRIL.double_integrator.double_integrator import generate_reference_trajectory
 
@@ -504,7 +507,7 @@ def run_ntril_training(
     venv = util.make_vec_env(
         env_id,
         rng=rng,
-        n_envs=5,
+        n_envs=8,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
         env_make_kwargs=env_options,
     )
@@ -800,6 +803,35 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--retrain", type=list, default=None)
     sp.add_argument("--just-plot-noisy-rollouts", type=bool, default=True)
     sp.add_argument("--archive-name", type=str, default=None)
+
+    sp = sub.add_parser(
+        "train-variant",
+        help="Train an isolated experimental NTRIL variant",
+    )
+    sp.add_argument(
+        "--noise-levels",
+        type=float,
+        nargs="+",
+        default=list(np.arange(0.0, 1.05, 0.05)),
+    )
+    sp.add_argument("--n-rollouts-per-noise", type=int, default=5)
+    sp.add_argument("--n-ensemble", type=int, default=3)
+    sp.add_argument("--rl-total-timesteps", type=int, default=1_000_000)
+    sp.add_argument("--retrain", nargs="*", default=None)
+    sp.add_argument(
+        "--ranked-data-source",
+        type=str,
+        choices=("hybrid", "augmented", "noisy"),
+        default="hybrid",
+    )
+    sp.add_argument("--disable-mpc-step", action="store_true")
+    sp.add_argument("--reward-hidden-sizes", type=int, nargs="+", default=[256, 256, 128])
+    sp.add_argument(
+        "--archive-name",
+        type=str,
+        default=None,
+        help="Name for the variant archive directory.",
+    )
     return p
 
 
@@ -824,8 +856,8 @@ def main():
 
     rngs = np.random.default_rng()
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
-    max_episode_seconds = 50.0
-    dt = 0.1
+    max_episode_seconds = 200.0
+    dt = 1.0
     ghost_env = gym.make(env_id, max_episode_seconds=max_episode_seconds, dt=dt)
 
     # Set up reference trajectory and save
@@ -953,25 +985,78 @@ def main():
             just_plot_noisy_rollouts=True,
             robust_mpc=robust_tube_mpc,
         )
-    else:
-        ntril_trainer = run_ntril_training(
-            suboptimal_policy=suboptimal_policy,
+    else: # args.command == "train-variant":
+        variant_save_dir = SCRIPT_DIR / "variant_outputs"
+        # variant_retrain = args.retrain
+        variant_retrain = ["bc", "rollouts", "mpc", "ranking", "irl", "rl"]
+        if variant_retrain == ["all"]:
+            variant_retrain = "all"
+        elif variant_retrain == []:
+            variant_retrain = None
+        # variant_kwargs = {
+        #     "ranked_data_source": args.ranked_data_source,
+        #     "include_mpc_step": not args.disable_mpc_step,
+        #     "reward_hidden_sizes": tuple(args.reward_hidden_sizes),
+        # }
+        # ntril_trainer, variant_ref_tag = run_variant_ntril_training(
+        #     env_id=env_id,
+        #     env_options={"max_episode_seconds": max_episode_seconds, "dt": dt},
+        #     save_dir=str(variant_save_dir),
+        #     noise_levels=tuple(args.noise_levels),
+        #     n_rollouts_per_noise=args.n_rollouts_per_noise,
+        #     n_ensemble=args.n_ensemble,
+        #     rl_total_timesteps=args.rl_total_timesteps,
+        #     retrain=variant_retrain,
+        #     variant_kwargs=variant_kwargs,
+        # )
+        # archive_name = (
+        #     args.archive_name
+        #     if args.archive_name
+        #     else f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{variant_ref_tag}_variant"
+        # )
+        variant_kwargs = {
+            "ranked_data_source": "hybrid",
+            "include_mpc_step": True,
+            "reward_hidden_sizes": (256, 256),
+        }
+        ntril_trainer, variant_ref_tag = run_variant_ntril_training(
             env_id=env_id,
-            env_options=env_options,
-            save_dir=str(SAVE_DIR),
-            noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+            env_options={"max_episode_seconds": max_episode_seconds, "dt": dt},
+            save_dir=str(variant_save_dir),
+            noise_levels=tuple(args.noise_levels),
             n_rollouts_per_noise=5,
+            n_ensemble=3,
             rl_total_timesteps=1_000_000,
-            run_individual_steps=[2,3,4,5,6],
-            retrain=["rollouts", "mpc", "ranking", "irl", "rl"],
-            just_plot_noisy_rollouts=False,
-            robust_mpc=robust_tube_mpc,
-            reference_trajectory=reference_trajectory,
+            retrain=variant_retrain,
+            variant_kwargs=variant_kwargs,
+        )
+        archive_name = (
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{variant_ref_tag}_variant"
         )
         ntril_trainer.archive_run(
-            name=_auto_archive_name,
-            archive_root=str(SAVE_DIR / "archived_runs"),
+            name=archive_name,
+            archive_root=str(variant_save_dir / "archived_runs"),
         )
+    # else:
+    #     ntril_trainer = run_ntril_training(
+    #         suboptimal_policy=suboptimal_policy,
+    #         env_id=env_id,
+    #         env_options=env_options,
+    #         save_dir=str(SAVE_DIR),
+    #         noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+    #         n_rollouts_per_noise=8,
+    #         rl_total_timesteps=1_000_000,
+    #         run_individual_steps=[2,3,4,5,6],
+    #         retrain=["rollouts", "mpc", "ranking", "irl", "rl"],
+    #         # retrain=None,
+    #         just_plot_noisy_rollouts=False,
+    #         robust_mpc=robust_tube_mpc,
+    #         reference_trajectory=reference_trajectory,
+    #     )
+    #     ntril_trainer.archive_run(
+    #         name=_auto_archive_name,
+    #         archive_root=str(SAVE_DIR / "archived_runs"),
+    #     )
 
 
 

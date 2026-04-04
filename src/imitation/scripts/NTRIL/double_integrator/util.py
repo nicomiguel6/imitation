@@ -534,8 +534,10 @@ def measure_ranking_separability(
         reward_tmp = []
         for state in states:
             state = state.flatten()
-            state = state[:2]
-            reward_tmp.append(-state.T @ Q @ state)
+            actual_state = state[:2]
+            ref_state = state[2:]
+            state_diff = actual_state - ref_state
+            reward_tmp.append(-state_diff.T @ Q @ state_diff)
         return np.sum(reward_tmp).flatten()[0] # should be a scalar
     
 
@@ -625,15 +627,16 @@ if __name__ == "__main__":
             ensemble_dir=args.ensemble_dir,
         )
     else:
-        # DREX_SAVE_DIR = SCRIPT_DIR / "drex_outputs"
-        # NTRIL_SAVE_DIR = SCRIPT_DIR / "ntril_outputs"
-        reference_trajectory = np.load(DEFAULT_SAVE_DIR / "reference_trajectory.npy")
-        plot_learned_reward_network(
-            save_dir=DEFAULT_SAVE_DIR,
-            device="cpu",
-            reference_trajectory=reference_trajectory,
-            ref_pos=2.0,
-            ref_vel=0.0,
-        )
-        # measure_ranking_separability()
+        DREX_SAVE_DIR = SCRIPT_DIR / "drex_outputs"
+        NTRIL_SAVE_DIR = SCRIPT_DIR / "ntril_outputs"
+        ensemble_dir = DREX_SAVE_DIR 
+        # reference_trajectory = np.load(DEFAULT_SAVE_DIR / "reference_trajectory.npy")
+        # plot_learned_reward_network(
+        #     save_dir=DEFAULT_SAVE_DIR,
+        #     device="cpu",
+        #     reference_trajectory=reference_trajectory,
+        #     ref_pos=2.0,
+        #     ref_vel=0.0,
+        # )
+        measure_ranking_separability(ensemble_dir=ensemble_dir)
         # _build_parser().print_help()

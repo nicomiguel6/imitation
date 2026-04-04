@@ -17,6 +17,7 @@ All ensemble training logic lives in the shared NTRILTrainer base class.
 """
 
 import dataclasses
+from datetime import datetime
 import os
 import pickle
 from pathlib import Path
@@ -190,18 +191,22 @@ def run_drex_training(
     rng = np.random.default_rng(42)
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    max_episode_seconds = 200.0
-    dt = 1.0
+    max_episode_seconds = env_options["max_episode_seconds"]
+    dt = env_options["dt"]
     ghost_env = gym.make(env_id, max_episode_seconds=max_episode_seconds, dt=dt)
 
     # Set up reference trajectory and save
+    ref_mode = "sinusoidal"
+    ref_amplitude = 1.0
+    ref_frequency = 0.01
+    ref_phase = 0.0
     reference_trajectory = generate_reference_trajectory(
         T=ghost_env.max_episode_steps,
         dt=ghost_env.dt,
-        mode="sinusoidal",
-        amplitude=5.0,
-        frequency=0.1,
-        phase=0.0,
+        mode=ref_mode,
+        amplitude=ref_amplitude,
+        frequency=ref_frequency,
+        phase=ref_phase,
     )
 
     env_options["reference_trajectory"] = reference_trajectory
@@ -209,7 +214,7 @@ def run_drex_training(
     venv = util.make_vec_env(
         env_id,
         rng=rng,
-        n_envs=8,
+        n_envs=5,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
         env_make_kwargs=env_options,
     )
@@ -255,7 +260,7 @@ def run_drex_training(
             print(f"    {key}: {value}")
 
     venv.close()
-    return trainer
+    return trainer, f"{ref_mode}_A{ref_amplitude}_f{ref_frequency}"
 
 
 def main():
@@ -263,7 +268,7 @@ def main():
     SCRIPT_DIR = Path(__file__).parent.resolve()
     SAVE_DIR = SCRIPT_DIR / "drex_outputs"
 
-    drex_trainer = run_drex_training(
+    drex_trainer, ref_tag = run_drex_training(
         env_id="imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0",
         env_options={"max_episode_seconds": 200.0, "dt": 1.0},
         save_dir=str(SAVE_DIR),
@@ -272,6 +277,12 @@ def main():
         n_ensemble=3,
         rl_total_timesteps=1_000_000,
         retrain="all",
+    )
+
+    archive_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{ref_tag}"
+    drex_trainer.archive_run(
+        name=archive_name,
+        archive_root=str(SAVE_DIR / "archived_runs"),
     )
 
     # Plot noisy rollouts
@@ -287,6 +298,7 @@ def main():
         plt.close(fig)
 
     print(f"\nAll outputs saved to: {SAVE_DIR}")
+    print(f"Run archived to     : {SAVE_DIR / 'archived_runs' / archive_name}")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import numpy as np
-import torch as th
 import gymnasium as gym
 import matplotlib.pyplot as plt
 
@@ -15,117 +14,196 @@ from imitation.data import types
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
+# ---------------------------------------------------------------------------
+# Model selection — add or remove names from this list to control which
+# models are simulated.  Available keys (defined in build_models() below):
+#   "ntril"       – NTRIL final policy (PPO)
+#   "drex"        – Pure D-REX final policy (PPO)
+#   "suboptimal"  – Suboptimal PID expert
+#   "mpc"         – Robust Tube MPC
+# ---------------------------------------------------------------------------
+ACTIVE_MODELS = [
+    "ntril",
+    "drex",
+    "suboptimal",
+    "mpc",
+]
+
+# ---------------------------------------------------------------------------
+# Per-model display settings used when plotting.
+# ---------------------------------------------------------------------------
+MODEL_STYLE = {
+    "ntril":      {"color": "k", "linestyle": "-",  "label": "NTRIL Final Policy"},
+    "drex":       {"color": "g", "linestyle": "-",  "label": "DREX Policy"},
+    "suboptimal": {"color": "b", "linestyle": "--", "label": "Suboptimal Policy"},
+    "mpc":        {"color": "r", "linestyle": "-",  "label": "MPC"},
+}
+
+
+def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, disturbance_vertices, reference_trajectory):
+    """Instantiate only the requested models and their environments.
+
+    Returns a dict keyed by model name, each value being a dict with:
+        env     – the Gymnasium environment
+        predict – callable(obs) -> action
+        reset   – optional callable(obs) called once before each episode
+    """
+    env_kwargs = dict(
+        max_episode_seconds=max_episode_seconds,
+        dt=dt,
+        disturbance_magnitude=disturbance_magnitude,
+        reference_trajectory=reference_trajectory,
+    )
+    env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
+
+    models = {}
+
+    if "ntril" in active_models:
+        ntril_path = (
+            SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
+        )
+        policy = PPO.load(ntril_path, device="cuda")
+        models["ntril"] = {
+            "env": gym.make(env_id, **env_kwargs),
+            "predict": lambda obs, p=policy: p.predict(obs)[0],
+            "reset": None,
+        }
+
+    if "drex" in active_models:
+        drex_path = SCRIPT_DIR / "drex_outputs" / "final_policy" / "final_policy.zip"
+        policy = PPO.load(drex_path, device="cuda")
+        models["drex"] = {
+            "env": gym.make(env_id, **env_kwargs),
+            "predict": lambda obs, p=policy: p.predict(obs)[0],
+            "reset": None,
+        }
+
+    if "suboptimal" in active_models:
+        env = gym.make(env_id, **env_kwargs)
+        policy = DoubleIntegratorSuboptimalPolicy(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+        )
+        policy.set_K_values(0.02, 0.3)
+        models["suboptimal"] = {
+            "env": env,
+            "predict": policy._choose_action,
+            "reset": None,
+        }
+
+    if "mpc" in active_models:
+        env = gym.make(env_id, **env_kwargs)
+        max_episode_steps = int(max_episode_seconds / dt)
+        ref_traj_mpc = types.Trajectory(
+            obs=reference_trajectory,
+            acts=np.zeros((max_episode_steps, 1)),
+            infos=np.array([{}] * max_episode_steps),
+            terminal=True,
+        )
+        policy = RobustTubeMPC(
+            horizon=10,
+            time_step=dt,
+            A=env.unwrapped.A_d,
+            B=env.unwrapped.B_d,
+            Q=np.diag([10.0, 1.0]),
+            R=0.1 * np.eye(1),
+            state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
+            control_bounds=(np.array([-20.0]), np.array([20.0])),
+            disturbance_bound=disturbance_magnitude,
+            disturbance_vertices=disturbance_vertices,
+            reference_trajectory=ref_traj_mpc,
+            use_approx=True,
+        )
+        policy.setup()
+        policy.set_reference_trajectory(ref_traj_mpc)
+        models["mpc"] = {
+            "env": env,
+            "predict": lambda obs, p=policy: p.solve_mpc(obs)[1],
+            "reset": lambda obs, p=policy: p.reset_episode(obs[:p.state_dim]),
+        }
+
+    return models
+
 
 def main():
     # Simulation params
-    disturbance_magnitude = 0.1
-    disturbance_vertices = np.array([[disturbance_magnitude, disturbance_magnitude], [-disturbance_magnitude, -disturbance_magnitude], [-disturbance_magnitude, disturbance_magnitude], [disturbance_magnitude, -disturbance_magnitude]])
     dt = 1.0
-    max_episode_seconds = 200
-
+    max_episode_seconds = 1000.0
+    disturbance_magnitude = 0.05
+    disturbance_vertices = np.array([
+        [ disturbance_magnitude,  disturbance_magnitude],
+        [-disturbance_magnitude, -disturbance_magnitude],
+        [-disturbance_magnitude,  disturbance_magnitude],
+        [ disturbance_magnitude, -disturbance_magnitude],
+    ])
     max_episode_steps = int(max_episode_seconds / dt)
-    # Set up reference trajectory
-    # reference_trajectory = np.load(SCRIPT_DIR / "ntril_outputs" / "reference_trajectory.npy")
-    reference_trajectory = generate_reference_trajectory(T=max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.01, phase=0.0)
-    reference_trajectory_mpc = types.Trajectory(obs=reference_trajectory, acts=np.zeros((max_episode_steps, 1)), infos=np.array([{}] * max_episode_steps), terminal=True)
-    
-    # Set up envs
-    env_mpc = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=disturbance_magnitude, reference_trajectory=reference_trajectory)
-    env_policy = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=disturbance_magnitude, reference_trajectory=reference_trajectory)
-    env_suboptimal = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0", max_episode_seconds=max_episode_seconds, dt = dt, disturbance_magnitude=disturbance_magnitude, reference_trajectory = reference_trajectory)
 
-    # load final policy
-    final_policy_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
-    final_policy = PPO.load(final_policy_path, device="cuda")
-
-    # # load pure drex policy
-    # drex_policy_path = SCRIPT_DIR / "drex_outputs" / "final_policy" / "final_policy.zip"
-    # final_policy = PPO.load(drex_policy_path, device="cuda")
-
-    # Suboptimal policy
-    suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
-        observation_space=env_policy.observation_space,
-        action_space=env_policy.action_space,
+    reference_trajectory = generate_reference_trajectory(
+        T=max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.01, phase=0.0
     )
 
-    device = "cuda"
-    if device == "mps":
-        th.set_default_dtype(th.float32)
-    else:
-        device = th.device("cuda" if th.cuda.is_available() else "cpu")
-
-    mpc_policy = RobustTubeMPC(
-        horizon=10,
-        time_step=dt,
-        A=env_mpc.A_d,
-        B=env_mpc.B_d,
-        Q=np.diag([10.0, 1.0]),
-        R=0.1 * np.eye(1),
-        state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds=(np.array([-20.0]), np.array([20.0])),
-        disturbance_bound = disturbance_magnitude,
-        disturbance_vertices = disturbance_vertices,
-        reference_trajectory = reference_trajectory_mpc,
+    models = build_models(
+        ACTIVE_MODELS, dt, max_episode_seconds, disturbance_magnitude, disturbance_vertices, reference_trajectory
     )
-    mpc_policy.setup()
-
-    mpc_policy.set_reference_trajectory(reference_trajectory_mpc)
-    K = [0.02, 0.3]
-    suboptimal_policy.set_K_values(K[0], K[1])
 
     initial_state = np.random.uniform(-2.0, 2.0, size=(2,)).astype(np.float32)
 
     for j in range(1):
-        obs, info = env_policy.reset(state=initial_state, options={"reference_trajectory": reference_trajectory})
-        obs_mpc, info = env_mpc.reset(state=initial_state, options={"reference_trajectory": reference_trajectory})
-        obs_suboptimal, info = env_suboptimal.reset(state=initial_state, options={"reference_trajectory": reference_trajectory})
-        states_policy = [obs.copy()]
-        states_mpc = [obs.copy()]
-        states_suboptimal = [obs_suboptimal.copy()]
-        actions_policy = []
-        actions_mpc = []
-        actions_suboptimal = []
-        rewards_policy = []
-        rewards_mpc = []
-        rewards_suboptimal = []
-        mpc_policy.reset_episode(obs[:mpc_policy.state_dim])
-        for i in range(env_policy.unwrapped.max_episode_steps):
-            action_suboptimal = suboptimal_policy._choose_action(obs_suboptimal)
-            action_policy, _ = final_policy.predict(obs)
-            _, action_mpc, _ = mpc_policy.solve_mpc(obs_mpc)
-            obs, reward, terminated, truncated, info = env_policy.step(action_policy)
-            obs_mpc, reward_mpc, terminated_mpc, truncated_mpc, info_mpc = env_mpc.step(action_mpc)
-            obs_suboptimal, reward_suboptimal, terminated_suboptimal, truncated_suboptimal, info_suboptimal = env_suboptimal.step(action_suboptimal)
-            states_policy.append(obs)
-            states_mpc.append(obs_mpc)
-            states_suboptimal.append(obs_suboptimal)
-            actions_policy.append(action_policy)
-            actions_mpc.append(action_mpc)
-            actions_suboptimal.append(action_suboptimal)
-            rewards_policy.append(reward)
-            rewards_mpc.append(reward_mpc)
-            rewards_suboptimal.append(reward_suboptimal)
-            if terminated or truncated:
+        # Reset all environments to the same initial state
+        obs_per_model = {}
+        for name, m in models.items():
+            obs, _ = m["env"].reset(
+                state=initial_state,
+                options={"reference_trajectory": reference_trajectory},
+            )
+            obs_per_model[name] = obs
+            if m["reset"] is not None:
+                m["reset"](obs)
+
+        states   = {name: [obs_per_model[name].copy()] for name in models}
+        actions  = {name: [] for name in models}
+        rewards  = {name: [] for name in models}
+        dones    = {name: False for name in models}
+
+        # Determine episode length from the first active env
+        ref_env = next(iter(models.values()))["env"]
+        for i in range(ref_env.unwrapped.max_episode_steps):
+            for name, m in models.items():
+                if dones[name]:
+                    continue
+                action = m["predict"](obs_per_model[name])
+                obs, reward, terminated, truncated, _ = m["env"].step(action)
+                obs_per_model[name] = obs
+                states[name].append(obs)
+                actions[name].append(action)
+                rewards[name].append(reward)
+                if terminated or truncated:
+                    dones[name] = True
+
+            if all(dones.values()):
                 break
 
-
-        states_policy = np.array(states_policy).reshape(-1, 4)
-        states_mpc = np.array(states_mpc).reshape(-1, 4)
-        states_suboptimal = np.array(states_suboptimal).reshape(-1, 4)
+        # Plot
         fig, ax = plt.subplots()
-        ax.plot(states_policy[:, 0], "k-", label="Final Policy Trajectory")
-        ax.plot(states_mpc[:, 0], "r-", label="MPC Trajectory")
-        ax.plot(states_suboptimal[:, 0], "b-", label="Suboptimal Policy Trajectory")
+        for name in models:
+            traj = np.array(states[name]).reshape(-1, 4)
+            style = MODEL_STYLE.get(name, {})
+            ax.plot(
+                traj[:, 0],
+                color=style.get("color", None),
+                linestyle=style.get("linestyle", "-"),
+                label=style.get("label", name),
+            )
         ax.set_xlabel("Time")
         ax.set_ylabel("Position")
-        ax.set_title("Final Policy, MPC, and Suboptimal Policy in Noisy Environment")
+        ax.set_title("Policy Comparison in Noisy Environment")
         ax.legend()
         fig.savefig(SCRIPT_DIR / f"trajectory_comparison_noisy_{j}.png")
         plt.close()
 
-        print("Total final policy cost: ", sum(rewards_policy))
-        print("Total MPC cost: ", sum(rewards_mpc))
-        print("Total suboptimal policy cost: ", sum(rewards_suboptimal))
+        for name in models:
+            print(f"Total {MODEL_STYLE.get(name, {}).get('label', name)} cost: {sum(rewards[name]):.4f}")
+
 
 if __name__ == "__main__":
     main()
