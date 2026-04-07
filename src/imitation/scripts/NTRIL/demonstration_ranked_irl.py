@@ -105,9 +105,9 @@ class RankedTransitionsDataset(Dataset):
         noise_levels = list(self.demo_dict.keys())
 
         for _ in range(self.num_snippets):
-            # Pick two distinct noise levels at random, but make sure they are not within 0.3 of each other
+            # Pick two distinct noise levels at random, but make sure they are not within 0.5 of each other
             ni, nj = 0, 0
-            while ni == nj or abs(noise_levels[ni] - noise_levels[nj]) < 0.3:
+            while ni == nj or abs(noise_levels[ni] - noise_levels[nj]) < 0.5:
                 ni = int(self.rng.integers(len(noise_levels)))
                 nj = int(self.rng.integers(len(noise_levels)))
 

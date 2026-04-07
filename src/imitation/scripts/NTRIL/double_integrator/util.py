@@ -628,8 +628,8 @@ if __name__ == "__main__":
         )
     else:
         DREX_SAVE_DIR = SCRIPT_DIR / "drex_outputs"
-        NTRIL_SAVE_DIR = SCRIPT_DIR / "ntril_outputs"
-        ensemble_dir = DREX_SAVE_DIR 
+        NTRIL_SAVE_DIR = SCRIPT_DIR / "variant_outputs"
+        ensemble_dir = NTRIL_SAVE_DIR 
         # reference_trajectory = np.load(DEFAULT_SAVE_DIR / "reference_trajectory.npy")
         # plot_learned_reward_network(
         #     save_dir=DEFAULT_SAVE_DIR,

@@ -109,7 +109,7 @@ def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, 
             R=0.1 * np.eye(1),
             state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
             control_bounds=(np.array([-20.0]), np.array([20.0])),
-            disturbance_bound=disturbance_magnitude,
+            artificial_disturbance_vertices=np.array([[-0.1], [0.1]]),
             disturbance_vertices=disturbance_vertices,
             reference_trajectory=ref_traj_mpc,
             use_approx=True,
@@ -128,8 +128,8 @@ def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, 
 def main():
     # Simulation params
     dt = 1.0
-    max_episode_seconds = 1000.0
-    disturbance_magnitude = 0.05
+    max_episode_seconds = 200.0
+    disturbance_magnitude = 0.1
     disturbance_vertices = np.array([
         [ disturbance_magnitude,  disturbance_magnitude],
         [-disturbance_magnitude, -disturbance_magnitude],
@@ -140,6 +140,9 @@ def main():
 
     reference_trajectory = generate_reference_trajectory(
         T=max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.01, phase=0.0
+    )
+    reference_trajectory = generate_reference_trajectory(
+        T=max_episode_steps, dt=dt, mode="constant", target_position=5.0
     )
 
     models = build_models(

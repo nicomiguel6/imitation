@@ -6,6 +6,7 @@ an isolated runner with separate output paths.
 
 import argparse
 import dataclasses
+from tqdm import tqdm
 from datetime import datetime
 import os
 import pickle
@@ -14,18 +15,22 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import gymnasium as gym
 import numpy as np
+import matplotlib.pyplot as plt
 from imitation.data import serialize
-from imitation.data.types import Trajectory
+from imitation.data.types import Trajectory, TrajectoryWithRew
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.rewards.reward_nets import TrajectoryRewardNet
 from imitation.scripts.NTRIL.double_integrator.double_integrator import (
     DoubleIntegratorSuboptimalPolicy,
     generate_reference_trajectory,
 )
+from imitation.policies.base import NonTrainablePolicy
 from imitation.scripts.NTRIL.ntril import NTRILTrainer
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
 from imitation.util import logger as imit_logger
 from imitation.util import util
+
+
 
 
 @dataclasses.dataclass
@@ -70,16 +75,16 @@ class VariantNTRILTrainer(NTRILTrainer):
         )
 
         self._logger.log("Variant Step 2: Creating reference trajectory with Tube-Robust MPC...")
-        _, mpc_stats = self._extract_reference_trajectory_with_mpc(
+        rtmpc_trajectories = self._extract_reference_trajectory_with_mpc(
             force_retrain="mpc" in force
         )
-        stats["mpc"] = {"n_noise_levels": len(mpc_stats)}
+        # stats["mpc"] = {"n_noise_levels": len(mpc_stats)}
 
-        self._logger.log("Variant Step 3: Generating noisy rollouts from RTMPC trajectories...")
-        _, rollout_stats = self._generate_noisy_rollouts(
+        self._logger.log("Variant Step 3: Generating noisy augmented rollouts from RTMPC trajectories...")
+        noisy_rollouts = self._generate_noisy_rollouts_from_rtmpc(
             force_retrain="rollouts" in force
         )
-        stats["rollouts"] = rollout_stats
+        # stats["rollouts"] = noisy_rollouts
 
         self._logger.log(
             f"Variant Step 4: Building {self.n_ensemble} ranked datasets "
@@ -128,7 +133,7 @@ class VariantNTRILTrainer(NTRILTrainer):
 
             # Load rtmpc trajectories
             rtmpc_trajectories = serialize.load(rtmpc_path)
-            self.rtmpc_trajectories.append(rtmpc_trajectories)
+            self.rtmpc_trajectories = rtmpc_trajectories
 
             return self.rtmpc_trajectories
 
@@ -160,52 +165,71 @@ class VariantNTRILTrainer(NTRILTrainer):
 
     def _generate_noisy_rollouts_from_rtmpc(self, force_retrain: bool = False):
         """Generate noisy rollouts from RTMPC trajectories."""
-        noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
+        noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts")
         data_exists = (
             os.path.exists(noisy_rollouts_path)
             and not force_retrain
         )
         if data_exists:
             print("Loading existing noisy rollouts from RTMPC trajectories...")
-            with open(noisy_rollouts_path, "rb") as f:
-                self.noisy_rollouts = pickle.load(f)
+            for noise_level in self.noise_levels:
+                noisy_rollouts_path_for_noise_level = os.path.join(noisy_rollouts_path, f"noise_{noise_level:.2f}.pkl")
+                if os.path.exists(noisy_rollouts_path_for_noise_level):
+                    noisy_rollouts_for_noise_level = serialize.load(noisy_rollouts_path_for_noise_level)
+                    self.noisy_rollouts.append(noisy_rollouts_for_noise_level)
+                else:
+                    raise ValueError(f"Noisy rollouts not found at {noisy_rollouts_path_for_noise_level}. Run _generate_noisy_rollouts_from_rtmpc() first.")
+            
             return self.noisy_rollouts
     
+        # Noisy rollout process
         self.noisy_rollouts = []
-        for rtmpc_trajectory in self.rtmpc_trajectories:
-            for noise_level in self.noise_levels:
-                noisy_rollout = self.robust_mpc.constrained_trajectory_augmentation(rtmpc_trajectory, noise_level)
-                self.noisy_rollouts[noise_level].append(noisy_rollout)
-        serialize.save(noisy_rollouts_path, self.noisy_rollouts)
+        for noise_level in self.noise_levels:
+            noisy_rollouts_for_noise_level = []
+            for rtmpc_trajectory in tqdm(self.rtmpc_trajectories, desc="Generating noisy rollouts from RTMPC trajectories"):
+                # extract reference states from the rtmpc_trajectory
+                reference_states = self._extract_reference_states(rtmpc_trajectory)
+                # extract physical state from the rtmpc_trajectory
+                physical_state = self._parse_trajectory(rtmpc_trajectory)
+                noisy_rollouts = self.robust_mpc.constrained_trajectory_augmentation(physical_state, reference_states, noise_level)
+                noisy_rollouts_for_noise_level.extend(noisy_rollouts)
+            
+            # # plot the noisy rollouts
+            # for noisy_rollout in noisy_rollouts_for_noise_level:
+            #     plt.plot(noisy_rollout.obs[:, 0])
+            # # plot reference trajectory
+            # plt.plot(self.reference_trajectory[:, 0], 'k--', linewidth=4, label="Reference Trajectory")
+            # plt.legend()
+            # plt.xlabel("Time")
+            # plt.ylabel("State")
+            # plt.title(f"Noisy Rollouts for Noise Level {noise_level:.2f}")
+            # plt.savefig(os.path.join(self.save_dir, "noisy_rollouts_for_noise_level", f"noise_{noise_level:.2f}.png"))
+            # plt.close()
+            # Save noisy rollouts for each noise level to a file
+            serialize.save(os.path.join(self.save_dir, "noisy_rollouts", f"noise_{noise_level:.2f}.pkl"), noisy_rollouts_for_noise_level)
+            self.noisy_rollouts.append(noisy_rollouts_for_noise_level)
+
         return self.noisy_rollouts
-
+    
     def _get_ranked_dataset_source(self) -> list:
-        """Select ranked dataset source: noisy, augmented, or hybrid."""
-        source = self.ranked_data_source.lower()
-        valid_sources = {"noisy", "augmented", "hybrid"}
-        if source not in valid_sources:
-            raise ValueError(
-                f"Invalid ranked_data_source='{self.ranked_data_source}'. "
-                f"Choose one of {sorted(valid_sources)}."
-            )
+        """Return the trajectory data used to build the ranked dataset.
 
-        if source == "noisy":
-            return self._ensure_noisy_rollouts_loaded()
-        if source == "augmented":
-            return self._ensure_augmented_data_loaded()
-
-        noisy_rollouts = self._ensure_noisy_rollouts_loaded()
-        augmented_data = self._ensure_augmented_data_loaded()
-        if len(noisy_rollouts) != len(augmented_data):
-            raise ValueError(
-                "Mismatched number of noise buckets between noisy and augmented "
-                "data. Regenerate rollouts/augmentation with matching settings."
-            )
-
-        hybrid_data = []
-        for noisy_bucket, augmented_bucket in zip(noisy_rollouts, augmented_data):
-            hybrid_data.append(list(augmented_bucket) + list(noisy_bucket))
-        return hybrid_data
+        Returns:
+            List of noisy rollouts for each noise level
+        """
+        if not self.noisy_rollouts:
+            for noise_level in self.noise_levels:
+                path = os.path.join(
+                    self.save_dir, "noisy_rollouts_for_noise_level", f"noise_{noise_level:.2f}.pkl"
+                )
+                if os.path.exists(path):
+                    self.noisy_rollouts.append(serialize.load(path))
+                else:
+                    raise ValueError(
+                        f"Noisy rollouts not found at {path}. "
+                        "Run _generate_noisy_rollouts_from_rtmpc() first."
+                    )
+        return self.noisy_rollouts
 
     def _make_reward_net(self) -> TrajectoryRewardNet:
         """Construct a reward net with variant-configurable hidden sizes."""
@@ -215,41 +239,43 @@ class VariantNTRILTrainer(NTRILTrainer):
             hid_sizes=self.reward_hidden_sizes,
         )
 
-    def _ensure_noisy_rollouts_loaded(self):
-        if self.noisy_rollouts:
-            return self.noisy_rollouts
+    def _solve_rtmpc(self, initial_state: np.ndarray, reference_trajectory: Trajectory) -> TrajectoryWithRew:
+        """Run the Robust Tube MPC over a full trajectory using :meth:`RobustTubeMPC.solve_mpc`.
 
-        noisy_rollouts_path = os.path.join(self.save_dir, "noisy_rollouts.pkl")
-        if not os.path.exists(noisy_rollouts_path):
-            raise ValueError(
-                f"Noisy rollouts not found at {noisy_rollouts_path}. "
-                "Run _generate_noisy_rollouts() first."
+        Args:
+            initial_state: Initial observation (may be augmented; the physical
+                slice is extracted automatically by ``reset_episode``).
+            reference_trajectory: Noisy rollout trajectory that defines the
+                episode length and carries noise metadata in its ``infos``.
+
+        Returns:
+            RTMPC nominal trajectory as a numpy array
+        """
+        # Reset MPC state machine for a fresh episode (sets z_nominal, warm-starts NLP).
+        self.robust_mpc.reset_episode(initial_state)
+
+        phys_initial = self.robust_mpc._extract_physical_state(initial_state)
+        builder = util.TrajectoryBuilder()
+        builder.start_episode(initial_obs=phys_initial)
+
+        state = phys_initial
+        n_steps = len(reference_trajectory.obs) - 1
+        for itr in range(n_steps):
+            next_state, applied_u, _ = self.robust_mpc.solve_mpc(state)
+            builder.add_step(
+                action=applied_u.flatten(),
+                next_obs=next_state.flatten(),
+                reward=0.0,
+                info={} if reference_trajectory.infos is None else reference_trajectory.infos[itr],
             )
-        with open(noisy_rollouts_path, "rb") as f:
-            self.noisy_rollouts = pickle.load(f)
-        return self.noisy_rollouts
+            state = next_state
 
-    def _ensure_augmented_data_loaded(self):
-        if self.augmented_data:
-            return self.augmented_data
-
-        loaded_augmented_data = []
-        for noise_level in self.noise_levels:
-            path = os.path.join(
-                self.save_dir, "augmented_data", f"noise_{noise_level:.2f}.pkl"
-            )
-            if not os.path.exists(path):
-                raise ValueError(
-                    f"Augmented data not found at {path}. "
-                    "Run _augment_data_with_mpc() first or set "
-                    "ranked_data_source='noisy'."
-                )
-            loaded_augmented_data.append(serialize.load(path))
-        self.augmented_data = loaded_augmented_data
-        return self.augmented_data
+        return builder.finish()
 
 
 def run_variant_ntril_training(
+    suboptimal_policy: Optional[NonTrainablePolicy] = None,
+    demonstrations: Optional[Sequence[TrajectoryWithRew]] = None,
     env_id: str = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0",
     env_options: Optional[Dict[str, Any]] = None,
     save_dir: str = "./variant_outputs",
@@ -257,12 +283,55 @@ def run_variant_ntril_training(
     n_rollouts_per_noise: int = 5,
     n_ensemble: int = 3,
     rl_total_timesteps: int = 1_000_000,
+    run_individual_steps: Optional[list] = None,
     retrain: Optional[Union[str, Sequence[str]]] = None,
     variant_kwargs: Optional[Mapping[str, Any]] = None,
-) -> Tuple[VariantNTRILTrainer, str]:
-    """Set up and run the experimental variant pipeline."""
+    robust_mpc: Optional[RobustTubeMPC] = None,
+    reference_trajectory: Optional[np.ndarray] = None,
+) -> "VariantNTRILTrainer":
+    """Set up and run the experimental variant pipeline.
+
+    Mirrors ``run_ntril_training`` in structure, running individual numbered
+    steps (1–6) in order and respecting the ``retrain`` cache-bypass flags.
+
+    Pipeline steps:
+      1: Obtain suboptimal policy (BC training or skip if policy provided)
+      2: Extract nominal reference trajectory via Robust Tube MPC
+      3: Generate noisy rollouts from RTMPC trajectories
+      4: Build ranked datasets (ensemble)
+      5: Train reward networks via demonstration-ranked IRL
+      6: Train final policy via RL on ensemble reward
+
+    Args:
+        suboptimal_policy: Pre-trained policy (mutually exclusive with
+            ``demonstrations``); skips Step 1 if provided.
+        demonstrations: Trajectory data for BC training in Step 1 (mutually
+            exclusive with ``suboptimal_policy``).
+        env_id: Gymnasium environment ID.
+        env_options: Dict of keyword arguments forwarded to ``gym.make``.
+        save_dir: Root directory for all saved artefacts.
+        noise_levels: Noise levels for noisy rollout generation (Step 3).
+        n_rollouts_per_noise: Rollouts collected per noise level.
+        n_ensemble: Number of reward networks in the ensemble.
+        rl_total_timesteps: Total timesteps for final RL training (Step 6).
+        run_individual_steps: Subset of step numbers (1–6) to execute.
+            Defaults to all six steps.
+        retrain: Steps to force-retrain even when cached artefacts exist.
+            Accepts ``None`` (use cache), ``"all"``, or a list of names from
+            ``("bc", "mpc", "rollouts", "ranking", "irl", "rl")``.
+        variant_kwargs: Extra keyword arguments forwarded to
+            :class:`VariantNTRILTrainer` (e.g. ``ranked_data_source``,
+            ``include_mpc_step``, ``reward_hidden_sizes``).
+        robust_mpc: Robust Tube MPC instance required for Steps 2 and 3.
+        reference_trajectory: Global sinusoidal reference numpy array injected
+            into the environment options.
+
+    Returns:
+        Trained :class:`VariantNTRILTrainer` instance.
+    """
     variant_kwargs = dict(variant_kwargs or {})
     env_options = dict(env_options or {"max_episode_seconds": 200.0, "dt": 1.0})
+    env_options["reference_trajectory"] = reference_trajectory
 
     print("\n" + "=" * 70)
     print("NTRIL VARIANT PIPELINE — DOUBLEINTEGRATOR-V0")
@@ -275,35 +344,10 @@ def run_variant_ntril_training(
     rng = np.random.default_rng(42)
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    max_episode_seconds = env_options["max_episode_seconds"]
-    dt = env_options["dt"]
-    ghost_env = gym.make(env_id, max_episode_seconds=max_episode_seconds, dt=dt)
-
-    ref_mode = "sinusoidal"
-    ref_amplitude = 1.0
-    ref_frequency = 0.01
-    ref_phase = 0.0
-    reference_trajectory = generate_reference_trajectory(
-        T=ghost_env.max_episode_steps,
-        dt=ghost_env.dt,
-        mode=ref_mode,
-        amplitude=ref_amplitude,
-        frequency=ref_frequency,
-        phase=ref_phase,
-    )
-    reference_trajectory_mpc = Trajectory(
-        obs=reference_trajectory,
-        acts=np.zeros((ghost_env.max_episode_steps, 1)),
-        infos=np.array([{}] * ghost_env.max_episode_steps),
-        terminal=True,
-    )
-    np.save(os.path.join(save_dir, "reference_trajectory.npy"), reference_trajectory)
-    env_options["reference_trajectory"] = reference_trajectory
-
     venv = util.make_vec_env(
         env_id,
         rng=rng,
-        n_envs=5,
+        n_envs=8,
         post_wrappers=[lambda e, _: RolloutInfoWrapper(e)],
         env_make_kwargs=env_options,
     )
@@ -312,32 +356,11 @@ def run_variant_ntril_training(
         format_strs=["stdout", "tensorboard", "csv"],
     )
 
-    suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
-        observation_space=ghost_env.observation_space,
-        action_space=ghost_env.action_space,
-    )
-    suboptimal_policy.set_K_values(K_position=0.02, K_velocity=0.3)
+    print("\nInitializing Variant NTRIL Trainer...")
+    print(f"  Noise levels        : {tuple(noise_levels)}")
+    print(f"  Rollouts per level  : {n_rollouts_per_noise}")
 
-    robust_mpc = RobustTubeMPC(
-        horizon=10,
-        time_step=dt,
-        disturbance_bound=0.1,
-        A=ghost_env.A_d,
-        B=ghost_env.B_d,
-        Q=np.diag([10.0, 1.0]),
-        R=0.1 * np.eye(1),
-        disturbance_vertices=np.array(
-            [[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]
-        ),
-        state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds=(np.array([-20.0]), np.array([20.0])),
-        reference_trajectory=reference_trajectory_mpc,
-        use_approx=True,
-    )
-    robust_mpc.setup()
-
-    trainer = VariantNTRILTrainer.from_policy(
-        policy=suboptimal_policy,
+    common_kwargs = dict(
         venv=venv,
         custom_logger=custom_logger,
         noise_levels=tuple(noise_levels),
@@ -346,31 +369,115 @@ def run_variant_ntril_training(
         irl_batch_size=32,
         irl_lr=1e-3,
         save_dir=save_dir,
+        reference_trajectory=reference_trajectory,
         **variant_kwargs,
     )
-    trainer.robust_mpc = robust_mpc
 
-    print("\nStarting NTRIL variant training pipeline...")
-    stats = trainer.train(
-        total_timesteps=rl_total_timesteps,
-        retrain=retrain,
-    )
+    if suboptimal_policy is not None:
+        variant_trainer = VariantNTRILTrainer.from_policy(suboptimal_policy, **common_kwargs)
+    elif demonstrations is not None:
+        variant_trainer = VariantNTRILTrainer.from_demonstrations(demonstrations, **common_kwargs)
+    else:
+        raise ValueError("Either 'suboptimal_policy' or 'demonstrations' must be provided.")
 
-    print("\n" + "=" * 70)
-    print("NTRIL Variant Training Complete!")
-    print("=" * 70)
-    print("\nTraining Statistics:")
-    for stage, stage_stats in stats.items():
-        print(f"\n  {stage.upper()}:")
-        if isinstance(stage_stats, dict):
-            for key, value in stage_stats.items():
-                print(f"    {key}: {value}")
+    if robust_mpc is not None:
+        variant_trainer.robust_mpc = robust_mpc
+
+    # Map step numbers → retrain step names.
+    _STEP_NUM_TO_NAME = {1: "bc", 2: "mpc", 3: "rollouts", 4: "ranking", 5: "irl", 6: "rl"}
+
+    if retrain == "all":
+        _force_set = set(_STEP_NUM_TO_NAME.values())
+    elif retrain is None:
+        _force_set = set()
+    else:
+        _force_set = set(retrain)
+
+    if run_individual_steps is None:
+        run_individual_steps = [1, 2, 3, 4, 5, 6]
+
+    irl_train_kwargs: Dict[str, Any] = {}
+    rl_train_kwargs: Dict[str, Any] = {}
+    step_results: Dict[str, Any] = {}
+
+    print(f"\nRunning variant steps: {run_individual_steps}")
+
+    for step_num in sorted(run_individual_steps):
+        print(f"\n{'=' * 60}")
+        print(f"Running Step {step_num}")
+        print(f"{'=' * 60}")
+
+        if step_num == 1:
+            print("Step 1: Training BC policy from demonstrations...")
+            bc_rollouts = variant_trainer._train_bc_policy(
+                force_retrain="bc" in _force_set,
+                progress_bar=True,
+            )
+            # step_results["bc"] = bc_stats
+            # print("\nBC Training Stats:")
+            # for key, value in bc_stats.items():
+            #     print(f"  {key}: {value}")
+
+        elif step_num == 2:
+            if robust_mpc is None:
+                raise ValueError("robust_mpc is required for Step 2 (RTMPC reference extraction).")
+            print("Step 2: Extracting nominal reference trajectory via Robust Tube MPC...")
+            rtmpc_trajectories = variant_trainer._extract_reference_trajectory_with_mpc(
+                force_retrain="mpc" in _force_set
+            )
+            step_results["mpc"] = {"n_rtmpc_trajectories": len(rtmpc_trajectories)}
+            print(f"\nExtracted {len(rtmpc_trajectories)} RTMPC reference trajectories.")
+
+        elif step_num == 3:
+            if robust_mpc is None:
+                raise ValueError("robust_mpc is required for Step 3 (noisy rollout generation).")
+            print("Step 3: Generating noisy rollouts from RTMPC trajectories...")
+            noisy_rollouts = variant_trainer._generate_noisy_rollouts_from_rtmpc(
+                force_retrain="rollouts" in _force_set
+            )
+            step_results["rollouts"] = {
+                "n_noise_levels": len(variant_trainer.noise_levels),
+                "n_rollouts_per_level": len(noisy_rollouts[0]) if noisy_rollouts else 0,
+            }
+            print(f"\nGenerated noisy rollouts for {len(variant_trainer.noise_levels)} noise levels.")
+
+        elif step_num == 4:
+            print("Step 4: Building ranked datasets...")
+            variant_trainer._build_ranked_dataset(force_retrain="ranking" in _force_set)
+            step_results["ranking"] = {
+                f"dataset_{i}_num_samples": len(ds)
+                for i, ds in enumerate(variant_trainer.ranked_datasets)
+            }
+            print("\nRanked datasets built.")
+
+        elif step_num == 5:
+            print("Step 5: Training reward networks via demonstration-ranked IRL...")
+            variant_trainer._train_reward_network(
+                force_retrain="irl" in _force_set,
+                **(irl_train_kwargs or {}),
+            )
+            step_results["irl"] = {"n_ensemble": variant_trainer.n_ensemble}
+            print("\nIRL training complete.")
+
+        elif step_num == 6:
+            print("Step 6: Training final policy via RL on ensemble reward...")
+            variant_trainer._train_final_policy(
+                total_timesteps=rl_total_timesteps,
+                force_retrain="rl" in _force_set,
+                **(rl_train_kwargs or {}),
+            )
+            step_results["rl"] = {"total_timesteps": rl_total_timesteps}
+            print("\nFinal policy training complete.")
+
         else:
-            print(f"    {stage_stats}")
+            raise ValueError(f"Invalid step number: {step_num}. Must be 1–6.")
+
+        print(f"\n{'=' * 70}")
+        print(f"Completed steps so far: {sorted(s for s in run_individual_steps if s <= step_num)}")
+        print(f"{'=' * 70}")
 
     venv.close()
-    ghost_env.close()
-    return trainer, f"{ref_mode}_A{ref_amplitude}_f{ref_frequency}"
+    return variant_trainer
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -380,12 +487,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-dir", type=str, default=None)
     parser.add_argument("--noise-levels", type=float, nargs="+", default=None)
     parser.add_argument("--n-rollouts-per-noise", type=int, default=5)
+    parser.add_argument("--n-ensemble", type=int, default=3)
     parser.add_argument("--rl-total-timesteps", type=int, default=1_000_000)
+    parser.add_argument(
+        "--run-individual-steps",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Subset of step numbers to run, e.g. --run-individual-steps 1 2 3",
+    )
     parser.add_argument(
         "--retrain",
         nargs="*",
         default=None,
-        help="Set to 'all' or provide steps like: rollouts mpc ranking irl rl",
+        help=(
+            "Steps to force-retrain even when cached artefacts exist. "
+            "Pass 'all' or names from: bc mpc rollouts ranking irl rl"
+        ),
     )
     parser.add_argument(
         "--ranked-data-source",
@@ -402,7 +520,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reward-hidden-sizes",
         type=int,
         nargs="+",
-        default=[256, 256, 128],
+        default=[256, 256],
     )
     parser.add_argument("--archive-name", type=str, default=None)
     return parser
@@ -434,11 +552,13 @@ def main():
         "reward_hidden_sizes": tuple(args.reward_hidden_sizes),
     }
 
-    trainer, ref_tag = run_variant_ntril_training(
+    trainer = run_variant_ntril_training(
         save_dir=str(save_dir),
         noise_levels=noise_levels,
         n_rollouts_per_noise=args.n_rollouts_per_noise,
+        n_ensemble=args.n_ensemble,
         rl_total_timesteps=args.rl_total_timesteps,
+        run_individual_steps=args.run_individual_steps,
         retrain=retrain,
         variant_kwargs=variant_kwargs,
     )
@@ -446,7 +566,7 @@ def main():
     archive_name = (
         args.archive_name
         if args.archive_name
-        else f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{ref_tag}_variant"
+        else f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_variant"
     )
     trainer.archive_run(
         name=archive_name,

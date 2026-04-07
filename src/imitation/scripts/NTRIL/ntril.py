@@ -1,15 +1,5 @@
 """Main NTRIL (Noisy Trajectory Ranked Imitation Learning) algorithm implementation."""
 
-import dataclasses
-import json
-import pickle
-import logging
-import os
-from tqdm import tqdm
-from datetime import datetime
-from enum import Enum, auto
-from typing import Any, Dict, Mapping, Optional, Sequence, Union, List
-
 import numpy as np
 import torch as th
 from torch.utils.data import DataLoader
@@ -27,6 +17,19 @@ from imitation.util import logger as imit_logger
 from imitation.util import util
 
 from matplotlib import pyplot as plt
+
+import dataclasses
+import json
+import pickle
+import logging
+import os
+from tqdm import tqdm
+from datetime import datetime
+from enum import Enum, auto
+from typing import Any, Dict, Mapping, Optional, Sequence, Union, List, TypeVar
+
+_T = TypeVar("_T", bound="NTRILTrainer")
+
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +88,11 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
     @classmethod
     def from_demonstrations(
-        cls,
+        cls: "type[_T]",
         demonstrations: Sequence[types.Trajectory],
         venv: vec_env.VecEnv,
         **kwargs,
-    ) -> "NTRILTrainer":
+    ) -> "_T":
         """Create a trainer that learns a BC policy from trajectory data.
 
         Step 1 of the NTRIL pipeline will train a BC policy on
@@ -110,11 +113,11 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
 
     @classmethod
     def from_policy(
-        cls,
+        cls: "type[_T]",
         policy: policies.BasePolicy,
         venv: vec_env.VecEnv,
         **kwargs,
-    ) -> "NTRILTrainer":
+    ) -> "_T":
         """Create a trainer that uses a pre-existing suboptimal policy.
 
         Step 1 of the NTRIL pipeline is skipped; ``policy`` is used directly
@@ -160,6 +163,9 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
         object.__setattr__(self, 'save_dir', save_dir)
 
         object.__setattr__(self, 'rng', np.random.default_rng(self.rng))
+
+        # Set reference trajectory
+        # object.__setattr__(self, 'reference_trajectory', self.reference_trajectory)
 
         # BC trainer — only created when we have demonstrations to train on.
         if self._expert_mode is _ExpertMode.DEMONSTRATIONS:
@@ -318,6 +324,10 @@ class NTRILTrainer(base.BaseImitationAlgorithm):
             self.venv,
             rollout.make_sample_until(min_timesteps=1000),
             rng=self.rng,
+            exclude_infos=False,
+            reset_options={"reference_trajectory": self.reference_trajectory}
+            if self.reference_trajectory is not None
+            else None,
         )
 
         # Save bc rollouts to file

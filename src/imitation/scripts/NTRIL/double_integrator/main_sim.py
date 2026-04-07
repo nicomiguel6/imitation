@@ -539,6 +539,7 @@ def run_ntril_training(
         irl_batch_size=32,
         irl_lr=1e-3,
         save_dir=save_dir,
+        reference_trajectory=reference_trajectory,
     )
 
     if suboptimal_policy is not None:
@@ -933,14 +934,14 @@ def main():
     robust_tube_mpc = RobustTubeMPC(
         horizon = 10,
         time_step = dt,
-        disturbance_bound = 0.1,
         A = ghost_env.A_d,
         B = ghost_env.B_d,
         Q = np.diag([10.0, 1.0]),
         R = 0.1*np.eye(1),
         disturbance_vertices = np.array([[0.1, 0.1], [-0.1, -0.1], [-0.1, 0.1], [0.1, -0.1]]),
-        state_bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
-        control_bounds = (np.array([-20.0]), np.array([20.0])),
+        # artificial_disturbance_vertices = np.array([[-1.5], [1.5]]),
+        state_bounds = (np.array([-1000.0, -1000.0]), np.array([1000.0, 1000.0])),
+        control_bounds = (np.array([-5.0]), np.array([5.0])),
         reference_trajectory = reference_trajectory_mpc,
         use_approx = True,
     )
@@ -985,78 +986,80 @@ def main():
             just_plot_noisy_rollouts=True,
             robust_mpc=robust_tube_mpc,
         )
-    else: # args.command == "train-variant":
-        variant_save_dir = SCRIPT_DIR / "variant_outputs"
-        # variant_retrain = args.retrain
-        variant_retrain = ["bc", "rollouts", "mpc", "ranking", "irl", "rl"]
-        if variant_retrain == ["all"]:
-            variant_retrain = "all"
-        elif variant_retrain == []:
-            variant_retrain = None
-        # variant_kwargs = {
-        #     "ranked_data_source": args.ranked_data_source,
-        #     "include_mpc_step": not args.disable_mpc_step,
-        #     "reward_hidden_sizes": tuple(args.reward_hidden_sizes),
-        # }
-        # ntril_trainer, variant_ref_tag = run_variant_ntril_training(
-        #     env_id=env_id,
-        #     env_options={"max_episode_seconds": max_episode_seconds, "dt": dt},
-        #     save_dir=str(variant_save_dir),
-        #     noise_levels=tuple(args.noise_levels),
-        #     n_rollouts_per_noise=args.n_rollouts_per_noise,
-        #     n_ensemble=args.n_ensemble,
-        #     rl_total_timesteps=args.rl_total_timesteps,
-        #     retrain=variant_retrain,
-        #     variant_kwargs=variant_kwargs,
-        # )
-        # archive_name = (
-        #     args.archive_name
-        #     if args.archive_name
-        #     else f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{variant_ref_tag}_variant"
-        # )
-        variant_kwargs = {
-            "ranked_data_source": "hybrid",
-            "include_mpc_step": True,
-            "reward_hidden_sizes": (256, 256),
-        }
-        ntril_trainer, variant_ref_tag = run_variant_ntril_training(
-            env_id=env_id,
-            env_options={"max_episode_seconds": max_episode_seconds, "dt": dt},
-            save_dir=str(variant_save_dir),
-            noise_levels=tuple(args.noise_levels),
-            n_rollouts_per_noise=5,
-            n_ensemble=3,
-            rl_total_timesteps=1_000_000,
-            retrain=variant_retrain,
-            variant_kwargs=variant_kwargs,
-        )
-        archive_name = (
-            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{variant_ref_tag}_variant"
-        )
-        ntril_trainer.archive_run(
-            name=archive_name,
-            archive_root=str(variant_save_dir / "archived_runs"),
-        )
-    # else:
-    #     ntril_trainer = run_ntril_training(
+    # else: # args.command == "train-variant":
+    #     variant_save_dir = SCRIPT_DIR / "variant_outputs"
+    #     # variant_retrain = args.retrain
+    #     variant_retrain = ["ranking", "irl", "rl"]
+    #     if variant_retrain == ["all"]:
+    #         variant_retrain = "all"
+    #     elif variant_retrain == []:
+    #         variant_retrain = None
+    #     # variant_kwargs = {
+    #     #     "ranked_data_source": args.ranked_data_source,
+    #     #     "include_mpc_step": not args.disable_mpc_step,
+    #     #     "reward_hidden_sizes": tuple(args.reward_hidden_sizes),
+    #     # }
+    #     # ntril_trainer, variant_ref_tag = run_variant_ntril_training(
+    #     #     env_id=env_id,
+    #     #     env_options={"max_episode_seconds": max_episode_seconds, "dt": dt},
+    #     #     save_dir=str(variant_save_dir),
+    #     #     noise_levels=tuple(args.noise_levels),
+    #     #     n_rollouts_per_noise=args.n_rollouts_per_noise,
+    #     #     n_ensemble=args.n_ensemble,
+    #     #     rl_total_timesteps=args.rl_total_timesteps,
+    #     #     retrain=variant_retrain,
+    #     #     variant_kwargs=variant_kwargs,
+    #     # )
+    #     # archive_name = (
+    #     #     args.archive_name
+    #     #     if args.archive_name
+    #     #     else f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{variant_ref_tag}_variant"
+    #     # )
+    #     variant_kwargs = {
+    #         "ranked_data_source": "hybrid",
+    #         "include_mpc_step": True,
+    #         "reward_hidden_sizes": (256, 256),
+    #     }
+    #     ntril_trainer = run_variant_ntril_training(
     #         suboptimal_policy=suboptimal_policy,
     #         env_id=env_id,
     #         env_options=env_options,
-    #         save_dir=str(SAVE_DIR),
+    #         save_dir=str(variant_save_dir),
     #         noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
-    #         n_rollouts_per_noise=8,
+    #         n_rollouts_per_noise=5,
+    #         n_ensemble=3,
     #         rl_total_timesteps=1_000_000,
-    #         run_individual_steps=[2,3,4,5,6],
-    #         retrain=["rollouts", "mpc", "ranking", "irl", "rl"],
-    #         # retrain=None,
-    #         just_plot_noisy_rollouts=False,
+    #         run_individual_steps=[1,2,3,4,5,6],
+    #         retrain=variant_retrain,
+    #         variant_kwargs=variant_kwargs,
     #         robust_mpc=robust_tube_mpc,
     #         reference_trajectory=reference_trajectory,
     #     )
+    #     archive_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_variant"
     #     ntril_trainer.archive_run(
-    #         name=_auto_archive_name,
-    #         archive_root=str(SAVE_DIR / "archived_runs"),
+    #         name=archive_name,
+    #         archive_root=str(variant_save_dir / "archived_runs"),
     #     )
+    else:
+        ntril_trainer = run_ntril_training(
+            suboptimal_policy=suboptimal_policy,
+            env_id=env_id,
+            env_options=env_options,
+            save_dir=str(SAVE_DIR),
+            noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+            n_rollouts_per_noise=8,
+            rl_total_timesteps=1_000_000,
+            run_individual_steps=[2,3,4,5,6],
+            retrain=["rollouts", "mpc", "ranking", "irl", "rl"],
+            # retrain=None,
+            just_plot_noisy_rollouts=False,
+            robust_mpc=robust_tube_mpc,
+            reference_trajectory=reference_trajectory,
+        )
+        ntril_trainer.archive_run(
+            name=_auto_archive_name,
+            archive_root=str(SAVE_DIR / "archived_runs"),
+        )
 
 
 
@@ -1089,18 +1092,19 @@ def main():
     for idx, noise_level in enumerate(ntril_trainer.noise_levels):
         # Use the first RTMPC trajectory and all augmented data for each noise level
         rtmpc_trajectory = ntril_trainer.rtmpc_trajectories[idx][0]  # one trajectory at this noise level
-        if noise_level == 0.0:
-            augmented_data = ntril_trainer.augmented_data[idx]           # augmented trajectories at this noise level
-        else:
+        # if noise_level == 0.0:
+        #     augmented_data = ntril_trainer.augmented_data[idx]           # augmented trajectories at this noise level
+        # else:
             # choose 10 random augmented trajectories at this noise level   
-            chosen_indices = np.random.choice(len(ntril_trainer.augmented_data[idx]), 10, replace=False)
-            augmented_data = [ntril_trainer.augmented_data[idx][int(i)] for i in chosen_indices]
+        chosen_indices = np.random.choice(len(ntril_trainer.augmented_data[idx]), 10, replace=False)
+        augmented_data = [ntril_trainer.augmented_data[idx][int(i)] for i in chosen_indices]
 
         fig, ax = plt.subplots()
         ax.plot(rtmpc_trajectory.obs[:, 0], color="blue", label="RTMPC Trajectory")
         for i, traj in enumerate(augmented_data):
             label = "Augmented Data" if i == 0 else None
-            ax.plot(traj.obs[:, 0], color="red", label=label)
+            timesteps = [traj.infos[i]["current_timestep"] for i in range(len(traj.obs)-1)]
+            ax.plot(timesteps, traj.obs[:-1, 0], color="red", label=label)
         ax.legend()
         ax.set_xlabel("Time")
         ax.set_ylabel("Position")

@@ -14,6 +14,7 @@ import casadi as ca
 import do_mpc
 import cdd
 import pytope
+from torch._inductor.config import epilogue_fusion_first
 import tqdm
 
 from matplotlib import pyplot as plt
@@ -37,13 +38,12 @@ class RobustTubeMPC:
         horizon: int = 10,
         episode_length: int = 200,
         time_step: float = 0.1,
-        disturbance_bound: Optional[float] = None,
-        tube_radius: Optional[float] = None,
         A: Optional[np.ndarray] = None,
         B: Optional[np.ndarray] = None,
         Q: Optional[np.ndarray] = None,
         R: Optional[np.ndarray] = None,
         disturbance_vertices: Optional[np.ndarray] = None,
+        artificial_disturbance_vertices: Optional[np.ndarray] = None,
         state_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         control_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         linearization_method: str = "finite_difference",
@@ -58,8 +58,6 @@ class RobustTubeMPC:
             horizon: MPC prediction horizon
             episode_length: Length of episode
             time_step: discretization time step for MPC
-            disturbance_bound: Bound for disturbance set
-            tube_radius: Radius of the robust tube
             A: State Dynamics matrix [MUST BE DISCRETE TIME]
             B: Control Dynamics matrix [MUST BE DISCRETE TIME]
             Q: State cost matrix (if None, will be identity)
@@ -76,8 +74,6 @@ class RobustTubeMPC:
         self.time_step = time_step
 
         # Handle defaults for disturbance_bound and tube_radius if not given
-        self.disturbance_bound = disturbance_bound
-        self.tube_radius = tube_radius
         self.use_approx = use_approx
         # Ensure that A and B matrices are provided
         if A is None or B is None:
@@ -91,7 +87,17 @@ class RobustTubeMPC:
         self.Q = Q if Q is not None else np.eye(state_dim)
         self.R = R if R is not None else np.eye(action_dim)
 
-        self.disturbance_vertices = disturbance_vertices
+        if disturbance_vertices is None:
+            self.disturbance_vertices = np.zeros((state_dim, 2))
+        else:
+            self.disturbance_vertices = disturbance_vertices
+        self.disturbance_bound = np.linalg.norm(self.disturbance_vertices, axis=1).max()
+
+        self.artificial_disturbance_vertices = artificial_disturbance_vertices
+        if self.artificial_disturbance_vertices is not None:
+            self.artificial_disturbance_bound = np.linalg.norm(self.artificial_disturbance_vertices, axis=1).max()
+        else:
+            self.artificial_disturbance_bound = 0.0
 
         # Handle state and control bounds: if not provided, allow unconstrained, i.e., set to None
         self.state_bounds = state_bounds
@@ -171,19 +177,37 @@ class RobustTubeMPC:
         # Closed loop
         self.Ak = self.A_d + self.B_d @ self.K
 
-        if self.disturbance_bound is not None:
+        if self.disturbance_bound > 0 or self.artificial_disturbance_bound > 0:
 
-            # Set up disturbance polytope
+            # Calculate total disturbance bound (d(x) = B_d*artificial_disturbance_set + disturbance_set)
+
+            # Set up disturbance polytopes
             self.disturbance_polytope = pytope.Polytope(self.disturbance_vertices)
+            
+            if self.artificial_disturbance_vertices is not None:
+                self.artificial_disturbance_polytope = pytope.Polytope(self.artificial_disturbance_vertices)
+                adjusted_artificial_disturbance_vertices = self.B_d @ self.artificial_disturbance_vertices.T
+                adjusted_artificial_disturbance_vertices = np.array([[x, y] for x, y in product(adjusted_artificial_disturbance_vertices[0], adjusted_artificial_disturbance_vertices[1])])
+                self.adjusted_artificial_disturbance_polytope = pytope.Polytope(adjusted_artificial_disturbance_vertices)
+            else:
+                self.adjusted_artificial_disturbance_polytope = None
+
+            if self.adjusted_artificial_disturbance_polytope is not None:
+                self.total_disturbance_polytope = self.adjusted_artificial_disturbance_polytope + self.disturbance_polytope
+            else:
+                self.total_disturbance_polytope = self.disturbance_polytope
+
+            # Calculate total disturbance bound
+            self.total_disturbance_bound = np.linalg.norm(self.total_disturbance_polytope.V, axis=1).max()
 
             # Compute mrpi set
             if self.use_approx:
-                self.Z = compute_approximate_linear_mrpi(self, disturbance_magnitude=self.disturbance_bound)
+                self.Z = compute_approximate_linear_mrpi(self, disturbance_magnitude=self.total_disturbance_bound)
                 self.A_F = self.Z.A
                 self.b_F = self.Z.b
             else:
                 self.A_F, self.b_F = compute_mrpi_hrep(
-                self.Ak, self.disturbance_polytope.A, self.disturbance_polytope.b
+                self.Ak, self.total_disturbance_polytope.A, self.total_disturbance_polytope.b
             )
                 self.Z = pytope.Polytope(self.A_F, self.b_F)
 
@@ -226,9 +250,6 @@ class RobustTubeMPC:
         }
         mpc.set_param(**setup_mpc)
 
-
-        # mpc.set_param(**setup_mpc)
-
         # Objective
         x = nominal_model.x["x"]
         u = nominal_model.u["u"]
@@ -236,7 +257,7 @@ class RobustTubeMPC:
         lterm = (x-nominal_model.tvp["state_set_point"]).T @ self.Q @ (x-nominal_model.tvp["state_set_point"]) + (u-nominal_model.tvp["control_set_point"]).T @ self.R @ (u-nominal_model.tvp["control_set_point"])
         mterm = (x-nominal_model.tvp["state_set_point"]).T @ self.P @ (x-nominal_model.tvp["state_set_point"]) # terminal cost
 
-        if self.disturbance_bound is not None:
+        if self.total_disturbance_bound > 0:
             # lower bounds of the states
             mpc.bounds["lower", "_x", "x"] = -np.array([self.b_x_t[1], self.b_x_t[3]])
 
@@ -262,7 +283,7 @@ class RobustTubeMPC:
             mpc.bounds["upper", "_u", "u"] = np.array([self.b_u[1]])
 
         # Print the bounds
-        if self.disturbance_bound is not None:
+        if self.total_disturbance_bound > 0:
             print("---------------------------------------------------------")
             print("Lower bounds of the states: ", mpc.bounds["lower", "_x", "x"])
             print("Upper bounds of the states: ", mpc.bounds["upper", "_x", "x"])
@@ -296,7 +317,7 @@ class RobustTubeMPC:
         self.mpc = mpc
 
 
-        if self.disturbance_bound is not None:
+        if self.total_disturbance_bound > 0:
 
             # ------------ DISTURBED MODEL & SIMULATOR SETUP ------------- #
             disturbed_model = do_mpc.model.Model(model_type)
@@ -322,7 +343,7 @@ class RobustTubeMPC:
             d_template = self.simulator.get_p_template()
 
             def d_fun(t_now):
-                d_template["d"] = sample_from_disturbance(self.disturbance_polytope)
+                d_template["d"] = sample_from_disturbance(self.total_disturbance_polytope)
                 return d_template
 
             self.simulator.set_p_fun(d_fun)
@@ -662,6 +683,7 @@ class RobustTubeMPC:
                             "margin_safety": margin_safety,
                             "noise_level": current_noise_level,
                             "total_applied_noise_sum": total_applied_noise_sum,
+                            "current_timestep": t + t_step,
                         },
                     )
 
@@ -710,23 +732,92 @@ class RobustTubeMPC:
 
         return augmented_trajs
 
-    def _sample_disturbance(self, scale: float = 1.0) -> np.ndarray:
-        """Sample a disturbance from the disturbance set.
-
+    def constrained_trajectory_augmentation(self, trajectory: types.Trajectory, reference_states: Optional[np.ndarray], noise_level: float) -> types.Trajectory:
+        """Augment a trajectory with constrained trajectory augmentation (for NTRIL variant).
+        
         Args:
-            scale: Scaling factor for disturbance magnitude
-
+            trajectory: Trajectory to augment
+            reference_states: Reference states to append to the augmented trajectories
+            noise_level: Noise level to use for augmentation
         Returns:
-            Sampled disturbance vector
-        """
-        if self.state_dim is None:
-            raise ValueError("State dimension not set")
+            Augmented trajectory
 
-        # Sample from uniform ball with radius = disturbance_bound * scale
-        direction = np.random.randn(self.state_dim)
-        direction /= np.linalg.norm(direction)
-        radius = np.random.uniform(0, self.disturbance_bound * scale)
-        return direction * radius
+        For each nominal reference trajectory resulting from the RTMPC, we look to execute a number of noisy rollouts. 
+        First, we sample a point from the tube surrounding the initial state of the nominal reference trajectory x(0)
+        Then, we start to rollout, injecting noise into the optimal action u*(k) = u(k) + K(x(k) - x*(k)) with probability epsilon.
+        We store this augmented trajectory as a rollout.
+        """
+
+        augmented_trajs = []
+
+        # Sample points from the tube surrounding the initial state of the nominal reference trajectory x(0)
+        tube_set = trajectory.obs[0] + self.Z
+        approx_tube = get_approximate_tube(tube_set)
+        samples = get_samples(approx_tube, corners=False)
+
+        # For each sample, we rollout the dynamics starting from the sample and following the ancillary controller u = u0 + K(x-x0)
+        for sample in samples:
+            # Reset simulator time to the nominal time of this outer step
+            # so the TVP (reference look-up) is consistent across samples.
+            self.simulator.t0 = 0.0
+
+            # initialize trajectory builder
+            builder = util.TrajectoryBuilder()
+            sampled_reference_state = reference_states[0]
+            builder.start_episode(initial_obs=np.concatenate((sample.flatten(), sampled_reference_state.flatten()), axis=0))
+
+            # initialize state and action
+            x = sample
+            self.simulator.x0 = x
+
+            # initialize metrics
+            total_applied_noise_sum = 0.0
+
+            # Iterate through reference trajectory
+            for t in range(len(trajectory.obs)-1):
+
+                # Nominal state and action
+                x_nominal = trajectory.obs[t]
+                u_nominal = trajectory.acts[t]
+
+                # Calculate action
+                u_applied = u_nominal + self.K @ (x.T.reshape(-1,1) - x_nominal.reshape(-1,1))
+
+                # Append noise only if random sample is less than noise_level
+                if np.random.uniform(0, 1) < noise_level:
+                    total_applied_noise_sum += 1
+                    disturbance = sample_from_disturbance(self.artificial_disturbance_polytope).flatten()
+                    u_applied += disturbance
+
+                # Propagate dynamics
+                x_next = self.simulator.make_step(u0=u_applied)
+
+                x = x_next
+
+                # Add reference state to augmented trajectory
+                if reference_states is not None:
+                    x_next = np.concatenate((x_next, reference_states[t].reshape(-1, 1)), axis=0)
+
+                # Add step to trajectory builder
+                builder.add_step(
+                    action=u_applied.flatten(),
+                    next_obs=x_next.flatten(),
+                    reward=0.0,
+                    info={
+                        "tracking_cost": 0.0,
+                        "margin_safety": 0.0,
+                        "noise_level": noise_level,
+                        "total_applied_noise_sum": total_applied_noise_sum,
+                        "current_timestep": t,
+                    },
+                )
+
+            # Finalize trajectory
+            traj = builder.finish(terminal=True)
+            augmented_trajs.append(traj)
+
+        return augmented_trajs
+
 
     def _compute_tracking_cost_metric(
         self, nominal_state: np.ndarray, x: np.ndarray, nominal_action: Optional[np.ndarray], u: Optional[np.ndarray], k: int
@@ -929,7 +1020,7 @@ def compute_approximate_linear_mrpi(robust_mpc: RobustTubeMPC, disturbance_magni
         obs, info = env.reset(state=initial_state.flatten())
         obs = obs[:internal_state_dim]
         for _ in range(total_time_steps):
-            disturbance = np.random.uniform(-disturbance_magnitude, disturbance_magnitude, size=(internal_state_dim,))
+            disturbance = sample_from_disturbance(robust_mpc.total_disturbance_polytope)
             # get next state
             next_obs = robust_mpc.Ak @ obs.reshape(-1, 1) + disturbance.reshape(-1, 1)
             trajectories[traj_idx].append(next_obs.flatten())
@@ -1151,10 +1242,16 @@ def sample_from_disturbance(W_polyhedron, n_samples=1):
     max_coords = np.max(vertices, axis=0)
 
     samples = []
-    while len(samples) < n_samples:
-        candidate = np.random.uniform(min_coords, max_coords)
-        if W_polyhedron.contains(candidate):
-            samples.append(candidate)
+    if len(vertices) == 2:
+        while len(samples) < n_samples:
+            candidate = np.random.uniform(min_coords, max_coords)
+            if candidate >= min_coords and candidate <= max_coords:
+                samples.append(candidate)
+    else:
+        while len(samples) < n_samples:
+            candidate = np.random.uniform(min_coords, max_coords)
+            if W_polyhedron.contains(candidate):
+                samples.append(candidate)
 
     return np.array(samples) if n_samples > 1 else samples[0]
 
