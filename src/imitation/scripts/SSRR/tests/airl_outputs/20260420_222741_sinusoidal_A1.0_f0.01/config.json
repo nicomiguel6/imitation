@@ -1,0 +1,19 @@
+{
+  "archive_name": "20260420_222741_sinusoidal_A1.0_f0.01",
+  "ref_mode": "sinusoidal",
+  "ref_amplitude": 1.0,
+  "ref_frequency": 0.01,
+  "ref_phase": 0.0,
+  "max_episode_seconds": 1000.0,
+  "dt": 1.0,
+  "total_timesteps": 2000000,
+  "demo_batch_size": 512,
+  "n_disc_updates_per_round": 2,
+  "disc_lr": 0.001,
+  "n_steps": 1000,
+  "batch_size": 64,
+  "gamma": 0.98,
+  "gae_lambda": 0.95,
+  "ent_coef": 0.01,
+  "target_kl": 0.02
+}

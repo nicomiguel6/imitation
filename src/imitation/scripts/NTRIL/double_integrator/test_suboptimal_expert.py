@@ -27,6 +27,7 @@ ACTIVE_MODELS = [
     "drex",
     "suboptimal",
     "mpc",
+    "airl"
 ]
 
 # ---------------------------------------------------------------------------
@@ -37,6 +38,7 @@ MODEL_STYLE = {
     "drex":       {"color": "g", "linestyle": "-",  "label": "DREX Policy"},
     "suboptimal": {"color": "b", "linestyle": "--", "label": "Suboptimal Policy"},
     "mpc":        {"color": "r", "linestyle": "-",  "label": "MPC"},
+    "airl":       {"color": "y", "linestyle": "--", "label": "AIRL"},
 }
 
 
@@ -122,6 +124,15 @@ def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, 
             "reset": lambda obs, p=policy: p.reset_episode(obs[:p.state_dim]),
         }
 
+    if "airl" in active_models:
+        airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/final_policy/learner_policy.zip"
+        # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_224617_sinusoidal_A1.0_f0.01/best_checkpoint/learner_policy.zip"
+        policy = PPO.load(airl_path, device="cpu")
+        models["airl"] = {
+            "env": gym.make(env_id, **env_kwargs),
+            "predict": lambda obs, p=policy: p.predict(obs)[0],
+            "reset": None,
+        }
     return models
 
 
@@ -129,7 +140,7 @@ def main():
     # Simulation params
     dt = 1.0
     max_episode_seconds = 200.0
-    disturbance_magnitude = 0.1
+    disturbance_magnitude = 0.0
     disturbance_vertices = np.array([
         [ disturbance_magnitude,  disturbance_magnitude],
         [-disturbance_magnitude, -disturbance_magnitude],
@@ -141,9 +152,9 @@ def main():
     reference_trajectory = generate_reference_trajectory(
         T=max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.01, phase=0.0
     )
-    reference_trajectory = generate_reference_trajectory(
-        T=max_episode_steps, dt=dt, mode="constant", target_position=5.0
-    )
+    # reference_trajectory = generate_reference_trajectory(
+    #     T=max_episode_steps, dt=dt, mode="constant", target_position=5.0
+    # )
 
     models = build_models(
         ACTIVE_MODELS, dt, max_episode_seconds, disturbance_magnitude, disturbance_vertices, reference_trajectory
