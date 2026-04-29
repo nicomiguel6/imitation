@@ -489,6 +489,7 @@ def generate_trajectories(
 
         # Merge per-environment noise info and label_info into infos
         if noise_mask is not None or label_info is not None:
+            infos = list(infos)
             for env_idx in range(venv.num_envs):
                 # Start with existing info from environment
                 merged_info = dict(infos[env_idx])
@@ -515,6 +516,7 @@ def generate_trajectories(
         # Add trajectory-level total applied noise sum to final step info when present.
         # Update the terminal info dict in place so we don't reassign it (and avoid
         # copying through the whole terminal info, e.g. "rollout" with full obs/rews).
+        # Add total reward at the end of the trajectory
         for traj in new_trajs:
             if traj.infos is None:
                 continue
@@ -529,6 +531,7 @@ def generate_trajectories(
                 if step_info.get("noise_applied", False):
                     total_applied += step_info.get("noise_level", 0.0)
             traj.infos[-1]["total_applied_noise_sum"] = total_applied
+            # traj.infos[-1]["total_reward"] = float(sum(traj.rews))
         trajectories.extend(new_trajs)
 
         if sample_until(trajectories):

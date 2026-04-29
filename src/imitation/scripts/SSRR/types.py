@@ -24,6 +24,12 @@ class SigmoidParams:
         eta_arr = np.asarray(eta, dtype=np.float64)
         return self.c / (1.0 + np.exp(-self.k * (eta_arr - self.x0))) + self.y0
 
+    def __iter__(self):
+        yield self.x0
+        yield self.y0
+        yield self.c
+        yield self.k
+
     def as_tuple(self) -> Tuple[float, float, float, float]:
         return (self.x0, self.y0, self.c, self.k)
 

@@ -1226,7 +1226,7 @@ def main():
             noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
             n_rollouts_per_noise=8,
             rl_total_timesteps=1_000_000,
-            run_individual_steps=[2, 3, 4, 5, 6],
+            run_individual_steps=[2], #, 3, 4, 5, 6],
             retrain=["rollouts", "mpc", "ranking", "irl", "rl"],
             # retrain=None,
             just_plot_noisy_rollouts=False,

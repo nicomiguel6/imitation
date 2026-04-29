@@ -1,5 +1,6 @@
 ''' Test the AIRL implementation '''
 
+# Standard library imports
 import json
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,7 +10,6 @@ from pathlib import Path
 import torch as th
 from datetime import datetime
 import os
-# Standard library imports
 
 # Third-party imports
 from stable_baselines3 import PPO
@@ -30,6 +30,8 @@ from imitation.util.networks import RunningNorm
 from imitation.scripts.NTRIL.double_integrator.main_sim import generate_reference_trajectory
 from imitation.scripts.NTRIL.double_integrator.double_integrator import DoubleIntegratorSuboptimalPolicy
 from imitation.algorithms import bc
+
+
 if __name__ == "__main__":
     # Configuration
     print("Testing AIRL on DoubleIntegrator-v0...")

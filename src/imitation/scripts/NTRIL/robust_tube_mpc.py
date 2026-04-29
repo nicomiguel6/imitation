@@ -10,8 +10,11 @@ import numpy as np
 import torch as th
 from scipy.optimize import minimize
 from scipy.linalg import solve_discrete_are, solve_continuous_are
+import warnings
 import casadi as ca
-import do_mpc
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", message="The ONNX feature is not available.*")
+    import do_mpc
 import cdd
 import pytope
 from torch._inductor.config import epilogue_fusion_first
