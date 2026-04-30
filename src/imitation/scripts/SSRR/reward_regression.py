@@ -23,13 +23,13 @@ class SnippetDataset(Dataset):
         buckets: Sequence[NoiseBucket],
         sigmoid: SigmoidParams,
         *,
-        num_samples: int,
+        num_snippets: int,
         cfg: SSRRRegressionConfig,
         rng: Optional[np.random.Generator] = None,
     ):
         self.buckets = list(buckets)
         self.sigmoid = sigmoid
-        self.num_samples = int(num_samples)
+        self.num_snippets = int(num_snippets)
         self.cfg = cfg
         self.rng = rng if rng is not None else np.random.default_rng()
 
@@ -41,7 +41,7 @@ class SnippetDataset(Dataset):
             raise ValueError("Need at least one NoiseBucket")
 
     def __len__(self) -> int:
-        return self.num_samples
+        return self.num_snippets
 
     def _sample_one(self) -> SnippetExample:
         b_idx = int(self.rng.integers(len(self.buckets)))
@@ -154,11 +154,11 @@ def make_dataloader(
     buckets: Sequence[NoiseBucket],
     sigmoid: SigmoidParams,
     *,
-    num_samples: int,
+    num_snippets: int,
     cfg: SSRRRegressionConfig,
     batch_size: int,
     rng: Optional[np.random.Generator] = None,
 ) -> DataLoader:
-    ds = SnippetDataset(buckets, sigmoid, num_samples=num_samples, cfg=cfg, rng=rng)
+    ds = SnippetDataset(buckets, sigmoid, num_snippets=num_snippets, cfg=cfg, rng=rng)
     return DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=_collate_snippets)
 

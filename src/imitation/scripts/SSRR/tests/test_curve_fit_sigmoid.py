@@ -112,6 +112,9 @@ if __name__ == "__main__":
     sigmoid_params, diag = fit_sigmoid_noise_performance(noise_performance_data, normalize_y=True, prefer_scipy=True)
     print(sigmoid_params)
 
+    # Save sigmoid params
+    np.save(airl_run_dir / "sigmoid_params.npy", np.asarray(sigmoid_params.as_tuple(), dtype=np.float64))
+
     # Plot sigmoid fit
     independent_noise_levels = np.linspace(0, 1.1, 1500)
     predicted_returns = _sigmoid(sigmoid_params, independent_noise_levels)
@@ -133,6 +136,9 @@ if __name__ == "__main__":
     plt.xlabel('Noise Level')
     plt.ylabel('Normalized Return')
     plt.legend()
-    plt.show()
+
+    plt.savefig(airl_run_dir / "sigmoid_fit.png")
+    plt.close()
+
     
 

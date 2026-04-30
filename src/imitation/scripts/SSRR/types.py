@@ -76,8 +76,8 @@ class SnippetExample:
 class SSRRRegressionConfig:
     """Controls snippet sampling + target scaling for Phase 3."""
 
-    min_steps: int = 50
-    max_steps: int = 500
+    min_steps: int = 10
+    max_steps: int = 10
     target_scale: float = 10.0
     # If True, target is sigma(eta) scaled by (L / T). If False, target is sigma(eta).
     length_normalize: bool = True
