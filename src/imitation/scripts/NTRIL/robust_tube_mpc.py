@@ -101,6 +101,8 @@ class RobustTubeMPC:
             self.artificial_disturbance_bound = np.linalg.norm(self.artificial_disturbance_vertices, axis=1).max()
         else:
             self.artificial_disturbance_bound = 0.0
+        
+        self.total_disturbance_bound = self.disturbance_bound + self.artificial_disturbance_bound
 
         # Handle state and control bounds: if not provided, allow unconstrained, i.e., set to None
         self.state_bounds = state_bounds

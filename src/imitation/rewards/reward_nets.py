@@ -438,6 +438,18 @@ class BasicRewardNet(RewardNet):
 
         self.mlp = networks.build_mlp(**full_build_mlp_kwargs)
 
+        custom_init = True
+        # initialize with small normal weights for stable early training
+        if custom_init:
+            self._init_weights()
+   
+    def _init_weights(self, mean: float = 0.0, std: float = 0.001) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=mean, std=std)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+
     def forward(self, state, action=None, next_state=None, done=None):
         unbatched = state.dim() == 1
         if unbatched:

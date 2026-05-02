@@ -7,7 +7,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from imitation.scripts.NTRIL.double_integrator.double_integrator import DoubleIntegratorSuboptimalPolicy, generate_reference_trajectory
 from imitation.data import types
 
@@ -23,11 +23,12 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 #   "mpc"         – Robust Tube MPC
 # ---------------------------------------------------------------------------
 ACTIVE_MODELS = [
-    "ntril",
-    "drex",
+    # "ntril",
+    # "drex",
     "suboptimal",
-    "mpc",
-    "airl"
+    # "mpc",
+    "airl",
+#     "ssrr",
 ]
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,7 @@ MODEL_STYLE = {
     "suboptimal": {"color": "b", "linestyle": "--", "label": "Suboptimal Policy"},
     "mpc":        {"color": "r", "linestyle": "-",  "label": "MPC"},
     "airl":       {"color": "y", "linestyle": "--", "label": "AIRL"},
+    "ssrr":       {"color": "c", "linestyle": "-",  "label": "SSRR"},
 }
 
 
@@ -111,7 +113,7 @@ def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, 
             R=0.1 * np.eye(1),
             state_bounds=(np.array([-10.0, -10.0]), np.array([10.0, 10.0])),
             control_bounds=(np.array([-20.0]), np.array([20.0])),
-            artificial_disturbance_vertices=np.array([[-0.1], [0.1]]),
+            artificial_disturbance_vertices=np.array([[0.0], [0.0]]),
             disturbance_vertices=disturbance_vertices,
             reference_trajectory=ref_traj_mpc,
             use_approx=True,
@@ -125,10 +127,21 @@ def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, 
         }
 
     if "airl" in active_models:
-        airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/final_policy/learner_policy.zip"
+        airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260501_224503_constant_P0.0/initial_BC_policy/bc_policy.zip" # for debugging initial BC policy
+        # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260501_221911_constant_P0.0/best_checkpoint/learner_policy.zip"
+        # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/final_policy/learner_policy.zip"
         # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_224617_sinusoidal_A1.0_f0.01/best_checkpoint/learner_policy.zip"
         policy = PPO.load(airl_path, device="cpu")
         models["airl"] = {
+            "env": gym.make(env_id, **env_kwargs),
+            "predict": lambda obs, p=policy: p.predict(obs)[0],
+            "reset": None,
+        }
+
+    if "ssrr" in active_models:
+        ssrr_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/ssrr_rl/latest/ssrr_rl_policy.zip"
+        policy = SAC.load(ssrr_path, device="cuda")
+        models["ssrr"] = {
             "env": gym.make(env_id, **env_kwargs),
             "predict": lambda obs, p=policy: p.predict(obs)[0],
             "reset": None,
@@ -149,12 +162,12 @@ def main():
     ])
     max_episode_steps = int(max_episode_seconds / dt)
 
-    reference_trajectory = generate_reference_trajectory(
-        T=max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.01, phase=0.0
-    )
     # reference_trajectory = generate_reference_trajectory(
-    #     T=max_episode_steps, dt=dt, mode="constant", target_position=5.0
+    #     T=max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.01, phase=0.0
     # )
+    reference_trajectory = generate_reference_trajectory(
+        T=max_episode_steps, dt=dt, mode="constant", target_position=0.0
+    )
 
     models = build_models(
         ACTIVE_MODELS, dt, max_episode_seconds, disturbance_magnitude, disturbance_vertices, reference_trajectory

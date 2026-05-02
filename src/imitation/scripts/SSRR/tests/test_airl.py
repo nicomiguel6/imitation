@@ -64,30 +64,48 @@ if __name__ == "__main__":
         dt=dt
     )
 
-    # Reference trajectory parameters
-    ref_mode = "sinusoidal"
-    ref_amplitude = 1.0
-    ref_frequency = 0.01
-    ref_phase = 0.0
+    # # Reference trajectory parameters
+    # ref_mode = "sinusoidal"
+    ref_mode = "constant"
 
     # Archive name for experiment results
-    _auto_archive_name = (
-        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        f"_{ref_mode}_A{ref_amplitude}_f{ref_frequency}"
-    )
+    if ref_mode == "constant":
+        ref_position = 0.0
+        _auto_archive_name = (
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            f"_{ref_mode}_P{ref_position}"
+        )
+        # Generate reference trajectory
+        reference_trajectory = generate_reference_trajectory(
+            T=env.max_episode_steps,
+            dt=env.dt,
+            mode=ref_mode,
+            target_position=ref_position,
+        )
+    elif ref_mode == "sinusoidal":
+        ref_amplitude = 1.0
+        ref_frequency = 0.01
+        ref_phase = 0.0
+        _auto_archive_name = (
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            f"_{ref_mode}_A{ref_amplitude}_f{ref_frequency}"
+        )
+        # Generate reference trajectory
+        reference_trajectory = generate_reference_trajectory(
+            T=env.max_episode_steps,
+            dt=env.dt,
+            mode=ref_mode,
+            amplitude=ref_amplitude,
+            frequency=ref_frequency,
+            phase=ref_phase,
+        )
+    else:
+        raise ValueError(f"Invalid reference trajectory mode: {ref_mode}")
+    
     # Save directory using auto archive name
     save_dir = SAVE_DIR / _auto_archive_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate reference trajectory
-    reference_trajectory = generate_reference_trajectory(
-        T=env.max_episode_steps,
-        dt=env.dt,
-        mode=ref_mode,
-        amplitude=ref_amplitude,
-        frequency=ref_frequency,
-        phase=ref_phase,
-    )
 
     # Create a Trajectory object for AIRL demonstration interface
     reference_trajectory_mpc = Trajectory(
@@ -140,10 +158,19 @@ if __name__ == "__main__":
     suboptimal_rollouts = rollout.rollout(
         suboptimal_policy,
         venv,
-        rollout.make_sample_until(min_episodes=5),
+        rollout.make_sample_until(min_episodes=50),
         rng=rngs,
         exclude_infos=True,
     )
+
+    # Plot suboptimal rollouts
+    fig, ax = plt.subplots()
+    for rollout in suboptimal_rollouts:
+        ax.plot(rollout.obs[:, 0], label="Position")
+        ax.plot(rollout.obs[:, 1], label="Velocity")
+        ax.legend()
+    fig.savefig(save_dir / "suboptimal_rollouts.png")
+    plt.close()
 
     # Set up Learner
     # PPO parameters mapped from Ant AIRL (ant_airl.py):
@@ -229,7 +256,7 @@ if __name__ == "__main__":
     # Train AIRL
     venv.seed(42)
     learner_rewards_before_training, _ = evaluate_policy(learner, venv, 100, return_episode_rewards=True)
-    total_timesteps = 2_000_000
+    total_timesteps = 500_000
 
     # Checkpoint callback: saves reward net + policy whenever raw env reward hits a new best.
     # Evaluates every `ckpt_every` rounds using the unwrapped env reward (not the AIRL reward).
@@ -296,9 +323,6 @@ if __name__ == "__main__":
     config = {
         "archive_name": _auto_archive_name,
         "ref_mode": ref_mode,
-        "ref_amplitude": ref_amplitude,
-        "ref_frequency": ref_frequency,
-        "ref_phase": ref_phase,
         "max_episode_seconds": max_episode_seconds,
         "dt": dt,
         "total_timesteps": total_timesteps,
@@ -312,6 +336,18 @@ if __name__ == "__main__":
         "ent_coef": ent_coef,
         "target_kl": target_kl,
     }
+
+    # Add mode-specific config fields for reference trajectory
+    if ref_mode == "sinusoidal":
+        config.update({
+            "ref_amplitude": ref_amplitude,
+            "ref_frequency": ref_frequency,
+            "ref_phase": ref_phase,
+        })
+    elif ref_mode == "constant":
+        config.update({
+            "ref_position": ref_position,
+        })
     config_path = save_dir / "config.json"
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)

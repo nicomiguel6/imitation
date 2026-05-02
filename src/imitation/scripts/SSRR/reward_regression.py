@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from imitation.data import types
 from imitation.rewards import reward_nets
+import tqdm
 
 from imitation.scripts.SSRR.types import NoiseBucket, SigmoidParams, SnippetExample, SSRRRegressionConfig
 
@@ -120,12 +121,13 @@ class SSRRRegressor:
         dataloader: DataLoader,
         *,
         n_steps: int,
-        log_interval: int = 200,
+        log_interval: int = 10000,
     ) -> Dict[str, List[float]]:
+
         self.reward_net.train()
         losses: List[float] = []
         it = iter(dataloader)
-        for step in range(1, n_steps + 1):
+        for step in tqdm.tqdm(range(1, n_steps + 1)):
             try:
                 obs_list, act_list, targets = next(it)
             except StopIteration:
@@ -143,6 +145,9 @@ class SSRRRegressor:
             pred_vec = th.stack(preds, dim=0)
 
             loss = th.mean((pred_vec - targets) ** 2)
+            if step % log_interval == 0:
+                tqdm.tqdm.write(f"Step {step}/{n_steps}: loss = {loss.item():.6f}")
+
             loss.backward()
             self.optim.step()
 
