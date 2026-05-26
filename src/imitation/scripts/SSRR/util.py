@@ -16,6 +16,8 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 import torch as th
 import matplotlib.pyplot as plt
+from matplotlib import cm, colors
+from matplotlib.widgets import Slider
 import gymnasium as gym
 
 from imitation.rewards.reward_nets import BasicRewardNet
@@ -121,6 +123,293 @@ def plot_learned_reward(
         print(f"Saved: {out_path}")
 
     return fig, ax
+
+
+def plot_learned_reward_time(
+    ensemble: Sequence[BasicRewardNet],
+    observation_space: gym.Space,
+    action_space: gym.Space,
+    *,
+    reference_trajectory: np.ndarray,
+    n_grid: int = 80,
+    max_slices: int = 50,
+    device: str = "cpu",
+    out_path: Optional[Path] = None,
+    title: Optional[str] = None,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """Plot time-indexed learned-reward contours as a 3D volume.
+
+    For each selected time-step ``t`` in ``reference_trajectory``, this function
+    evaluates the ensemble reward over a ``(position, velocity)`` mesh while
+    fixing the reference state ``(ref_pos_t, ref_vel_t)``. Each reward slice is
+    rendered as a 2D contour in 3D space at ``y=t``.
+
+    The resulting axes are:
+      - x-axis: position
+      - y-axis: time-step index
+      - z-axis: velocity
+    """
+    if reference_trajectory.ndim != 2 or reference_trajectory.shape[1] < 2:
+        raise ValueError(
+            "reference_trajectory must be shaped (T, obs_dim) with at least 2 columns."
+        )
+
+    obs_low = observation_space.low
+    obs_high = observation_space.high
+    pos_vals = np.linspace(obs_low[0], obs_high[0], n_grid)
+    vel_vals = np.linspace(obs_low[1], obs_high[1], n_grid)
+    pos_grid, vel_grid = np.meshgrid(pos_vals, vel_vals)
+    n_pts = n_grid * n_grid
+
+    action_dim = action_space.shape[0]
+    dummy_acts = np.zeros((n_pts, action_dim), dtype=np.float32)
+    dummy_done = np.zeros(n_pts, dtype=np.float32)
+
+    t_count = reference_trajectory.shape[0]
+    n_slices = min(max_slices, t_count)
+    t_indices = np.linspace(0, t_count - 1, n_slices, dtype=int)
+
+    reward_slices = []
+    for t in t_indices:
+        ref_pos_t = float(reference_trajectory[t, 0])
+        ref_vel_t = float(reference_trajectory[t, 1])
+        obs_flat = np.stack(
+            [
+                pos_grid.ravel(),
+                vel_grid.ravel(),
+                np.full(n_pts, ref_pos_t, dtype=np.float32),
+                np.full(n_pts, ref_vel_t, dtype=np.float32),
+            ],
+            axis=1,
+        ).astype(np.float32)
+        dummy_next = np.zeros_like(obs_flat)
+
+        per_net = np.stack(
+            [
+                net.predict_processed(
+                    obs_flat,
+                    dummy_acts,
+                    dummy_next,
+                    dummy_done,
+                    update_stats=False,
+                )
+                for net in ensemble
+            ],
+            axis=0,
+        )
+        reward_slices.append(per_net.mean(axis=0).reshape(n_grid, n_grid))
+
+    reward_stack = np.stack(reward_slices, axis=0)
+    vmin = float(np.min(reward_stack))
+    vmax = float(np.max(reward_stack))
+    norm = colors.Normalize(vmin=vmin, vmax=vmax)
+    cmap = cm.get_cmap("viridis")
+
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection="3d")
+
+    for time_idx, reward_grid in zip(t_indices, reward_slices):
+        face_colors = cmap(norm(reward_grid))
+        ax.contourf(
+            pos_grid,
+            vel_grid,
+            reward_grid,
+            zdir="y",
+            offset=float(time_idx),
+            levels=30,
+            cmap=cmap,
+            norm=norm,
+            alpha=0.8,
+        )
+        # Add a light wireframe to improve slice readability in 3D perspective.
+        ax.plot_surface(
+            pos_grid,
+            np.full_like(pos_grid, float(time_idx)),
+            vel_grid,
+            facecolors=face_colors,
+            rstride=max(1, n_grid // 25),
+            cstride=max(1, n_grid // 25),
+            linewidth=0,
+            antialiased=False,
+            shade=False,
+            alpha=0.08,
+        )
+
+    mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+    mappable.set_array([])
+    fig.colorbar(mappable, ax=ax, shrink=0.65, pad=0.1, label="R_θ(s)  [ensemble mean]")
+
+    ax.set_xlabel("Position")
+    ax.set_ylabel("Time step")
+    ax.set_zlabel("Velocity")
+    ax.set_xlim(float(obs_low[0]), float(obs_high[0]))
+    ax.set_ylim(float(t_indices[0]), float(t_indices[-1]))
+    ax.set_zlim(float(obs_low[1]), float(obs_high[1]))
+    ax.set_title(title or "Time-varying mean learned reward (SSRR ensemble)")
+    ax.view_init(elev=25, azim=-60)
+
+    if out_path is not None:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=160, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved: {out_path}")
+
+    return fig, ax
+
+
+def plot_learned_reward_time_slider(
+    ensemble: Sequence[BasicRewardNet],
+    observation_space: gym.Space,
+    action_space: gym.Space,
+    *,
+    reference_trajectory: np.ndarray,
+    n_grid: int = 100,
+    max_frames: int = 250,
+    device: str = "cpu",
+    out_path: Optional[Path] = None,
+    title: Optional[str] = None,
+) -> Tuple[plt.Figure, plt.Axes, Slider]:
+    """Plot a 2D contour with an interactive time slider.
+
+    Precomputes reward contours over selected reference time steps and provides
+    a slider to scrub through frames while keeping a fixed color scale.
+    """
+    del device  # Kept for API consistency with other plotting helpers.
+
+    if reference_trajectory.ndim != 2 or reference_trajectory.shape[1] < 2:
+        raise ValueError(
+            "reference_trajectory must be shaped (T, obs_dim) with at least 2 columns."
+        )
+
+    obs_low = observation_space.low
+    obs_high = observation_space.high
+    pos_vals = np.linspace(obs_low[0], obs_high[0], n_grid)
+    vel_vals = np.linspace(obs_low[1], obs_high[1], n_grid)
+    pos_grid, vel_grid = np.meshgrid(pos_vals, vel_vals)
+    n_pts = n_grid * n_grid
+
+    action_dim = action_space.shape[0]
+    dummy_acts = np.zeros((n_pts, action_dim), dtype=np.float32)
+    dummy_done = np.zeros(n_pts, dtype=np.float32)
+
+    t_count = reference_trajectory.shape[0]
+    n_frames = min(max_frames, t_count)
+    t_indices = np.linspace(0, t_count - 1, n_frames, dtype=int)
+
+    reward_slices = []
+    for t in t_indices:
+        ref_pos_t = float(reference_trajectory[t, 0])
+        ref_vel_t = float(reference_trajectory[t, 1])
+        obs_flat = np.stack(
+            [
+                pos_grid.ravel(),
+                vel_grid.ravel(),
+                np.full(n_pts, ref_pos_t, dtype=np.float32),
+                np.full(n_pts, ref_vel_t, dtype=np.float32),
+            ],
+            axis=1,
+        ).astype(np.float32)
+        dummy_next = np.zeros_like(obs_flat)
+
+        per_net = np.stack(
+            [
+                net.predict_processed(
+                    obs_flat,
+                    dummy_acts,
+                    dummy_next,
+                    dummy_done,
+                    update_stats=False,
+                )
+                for net in ensemble
+            ],
+            axis=0,
+        )
+        reward_slices.append(per_net.mean(axis=0).reshape(n_grid, n_grid))
+
+    reward_stack = np.stack(reward_slices, axis=0)
+    norm = colors.Normalize(
+        vmin=float(np.min(reward_stack)),
+        vmax=float(np.max(reward_stack)),
+    )
+    cmap = cm.get_cmap("viridis")
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    fig.subplots_adjust(bottom=0.18)
+
+    traj_pos = reference_trajectory[t_indices, 0]
+    traj_vel = reference_trajectory[t_indices, 1]
+    ax.plot(traj_pos, traj_vel, "w--", linewidth=1.0, alpha=0.9, label="Reference path")
+    (marker,) = ax.plot([traj_pos[0]], [traj_vel[0]], "wo", markersize=7, label="Current ref")
+
+    contour_set = ax.contourf(
+        pos_grid,
+        vel_grid,
+        reward_slices[0],
+        levels=50,
+        cmap=cmap,
+        norm=norm,
+    )
+
+    mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+    mappable.set_array([])
+    fig.colorbar(mappable, ax=ax, label="R_θ(s)  [ensemble mean]")
+
+    ax.set_xlabel("Position")
+    ax.set_ylabel("Velocity")
+    ax.set_xlim(float(obs_low[0]), float(obs_high[0]))
+    ax.set_ylim(float(obs_low[1]), float(obs_high[1]))
+    ax.grid(True, alpha=0.2)
+    ax.legend(loc="upper right", fontsize=8)
+
+    def _set_title(frame_idx: int) -> None:
+        t = int(t_indices[frame_idx])
+        ref_pos_t = float(reference_trajectory[t, 0])
+        ref_vel_t = float(reference_trajectory[t, 1])
+        base_title = title or "Time-varying mean learned reward (slider view)"
+        ax.set_title(
+            f"{base_title}\nframe={frame_idx + 1}/{n_frames}, t={t}, "
+            f"ref=({ref_pos_t:.3f}, {ref_vel_t:.3f})"
+        )
+
+    _set_title(0)
+
+    slider_ax = fig.add_axes([0.18, 0.07, 0.64, 0.035])
+    slider = Slider(
+        ax=slider_ax,
+        label="Frame",
+        valmin=0,
+        valmax=n_frames - 1,
+        valinit=0,
+        valstep=1,
+    )
+
+    def _update(_val: float) -> None:
+        nonlocal contour_set
+        frame_idx = int(slider.val)
+        for coll in contour_set.collections:
+            coll.remove()
+        contour_set = ax.contourf(
+            pos_grid,
+            vel_grid,
+            reward_slices[frame_idx],
+            levels=50,
+            cmap=cmap,
+            norm=norm,
+        )
+        marker.set_data([traj_pos[frame_idx]], [traj_vel[frame_idx]])
+        _set_title(frame_idx)
+        fig.canvas.draw_idle()
+
+    slider.on_changed(_update)
+
+    if out_path is not None:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=160, bbox_inches="tight")
+        print(f"Saved: {out_path}")
+
+    return fig, ax, slider
 
 
 def load_ssrr_ensemble(

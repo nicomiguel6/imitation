@@ -26,6 +26,7 @@ from imitation.scripts.NTRIL.noise_injection import NoisyPolicy
 # Reference trajectory generator
 # ---------------------------------------------------------------------------
 
+
 def generate_reference_trajectory(
     T: int,
     dt: float = 1.0,
@@ -102,7 +103,7 @@ def generate_reference_trajectory(
     elif mode == "sinusoidal":
         amplitude = float(kwargs.get("amplitude", 1.0))
         frequency = float(kwargs.get("frequency", 0.1))  # Hz
-        phase = float(kwargs.get("phase", 0.0))          # rad
+        phase = float(kwargs.get("phase", 0.0))  # rad
         t = np.arange(T, dtype=np.float32) * dt
         omega = 2.0 * np.pi * frequency
         ref_traj[:, 0] = amplitude * np.sin(omega * t + phase)
@@ -112,7 +113,9 @@ def generate_reference_trajectory(
         if mode == "random_waypoints":
             n_waypoints = int(kwargs.get("n_waypoints", 4))
             max_pos = float(kwargs.get("max_position", 5.0))
-            positions: List[float] = rng.uniform(-max_pos, max_pos, size=n_waypoints).tolist()
+            positions: List[float] = rng.uniform(
+                -max_pos, max_pos, size=n_waypoints
+            ).tolist()
         else:
             positions = list(kwargs["positions"])
 
@@ -124,14 +127,18 @@ def generate_reference_trajectory(
         if sps is None:
             base = T // n_segments
             remainder = T % n_segments
-            steps_per_seg = [base + (1 if i < remainder else 0) for i in range(n_segments)]
+            steps_per_seg = [
+                base + (1 if i < remainder else 0) for i in range(n_segments)
+            ]
         elif isinstance(sps, int):
             steps_per_seg = [sps] * n_segments
         else:
             steps_per_seg = list(sps)
 
         idx = 0
-        for p_start, p_end, n_steps in zip(positions[:-1], positions[1:], steps_per_seg):
+        for p_start, p_end, n_steps in zip(
+            positions[:-1], positions[1:], steps_per_seg
+        ):
             if n_steps == 0 or idx >= T:
                 continue
             end_idx = min(idx + n_steps, T)
@@ -141,9 +148,11 @@ def generate_reference_trajectory(
                 ref_traj[idx, 1] = 0.0
             else:
                 t_seg = np.arange(seg_len, dtype=np.float32)
-                ref_traj[idx:end_idx, 0] = p_start + (p_end - p_start) * t_seg / (seg_len - 1)
+                ref_traj[idx:end_idx, 0] = p_start + (p_end - p_start) * t_seg / (
+                    seg_len - 1
+                )
                 seg_vel = (p_end - p_start) / ((seg_len - 1) * dt)
-                ref_traj[idx:end_idx - 1, 1] = seg_vel
+                ref_traj[idx : end_idx - 1, 1] = seg_vel
                 ref_traj[end_idx - 1, 1] = 0.0  # zero at each junction
             idx = end_idx
 
@@ -159,7 +168,9 @@ def generate_reference_trajectory(
         )
 
     # Append final reference state (position and velocity) to the trajectory
-    ref_traj = np.concatenate([ref_traj, np.array([[ref_traj[-1, 0], ref_traj[-1, 1]]])], axis=0)
+    ref_traj = np.concatenate(
+        [ref_traj, np.array([[ref_traj[-1, 0], ref_traj[-1, 1]]])], axis=0
+    )
 
     return ref_traj
 
@@ -167,6 +178,7 @@ def generate_reference_trajectory(
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
+
 
 class DoubleIntegratorEnv(gym.Env):
     """Double integrator environment with reference-trajectory tracking.
@@ -195,8 +207,8 @@ class DoubleIntegratorEnv(gym.Env):
     def __init__(
         self,
         dt: float = 1.0,
-        max_position: float = 1000.0,
-        max_velocity: float = 10.0,
+        max_position: float = 5.0,
+        max_velocity: float = 1.0,
         max_acceleration: float = 5.0,
         target_position: float = 0.0,
         position_tolerance: float = 0.1,
@@ -396,7 +408,9 @@ class DoubleIntegratorEnv(gym.Env):
             truncated: ``True`` when ``max_episode_steps`` is reached.
             info: Dictionary with position, velocity, and tracking errors.
         """
-        action = np.asarray(action, dtype=np.float32).reshape(1,)
+        action = np.asarray(action, dtype=np.float32).reshape(
+            1,
+        )
         action = np.clip(action, -self.max_acceleration, self.max_acceleration)
 
         # ZOH discrete step: x_{k+1} = A_d x_k + B_d u_k
@@ -448,8 +462,8 @@ class DoubleIntegratorEnv(gym.Env):
         control_effort = action[0] ** 2
 
         reward = -(
-            self.position_cost_weight * position_error ** 2
-            + self.velocity_cost_weight * velocity_error ** 2
+            self.position_cost_weight * position_error**2
+            + self.velocity_cost_weight * velocity_error**2
             + self.control_cost_weight * control_effort
         )
 
@@ -511,13 +525,81 @@ class DoubleIntegratorEnv(gym.Env):
         K = np.array([[K_position, K_velocity]], dtype=np.float32)
         error = state[:2] - reference_state[:2]
         acceleration = -K @ error.reshape(2, 1)
-        acceleration = np.clip(acceleration, -self.max_acceleration, self.max_acceleration)
-        return acceleration.reshape(1,).astype(np.float32)
+        acceleration = np.clip(
+            acceleration, -self.max_acceleration, self.max_acceleration
+        )
+        return acceleration.reshape(
+            1,
+        ).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
 # NonTrainablePolicy wrapper
 # ---------------------------------------------------------------------------
+
+
+class DoubleIntegratorTrackingReward:
+    """Lightweight reward wrapper for 4D tracking observations.
+
+    Observation format is assumed to be:
+        ``[position, velocity, ref_position, ref_velocity]``.
+
+    The reward uses a quadratic cost on tracking error and action effort:
+        ``r = -(e^T Q e + u^T R u)`` where ``e = [pos-ref_pos, vel-ref_vel]``.
+    """
+
+    def __init__(
+        self,
+        Q: Optional[np.ndarray] = None,
+        R: Optional[np.ndarray] = None,
+    ):
+        self.set_reward_matrices(
+            np.eye(2, dtype=np.float32) if Q is None else Q,
+            np.diag([0.1]).astype(np.float32) if R is None else R,
+        )
+
+    def set_reward_matrices(self, Q: np.ndarray, R: np.ndarray) -> None:
+        self.Q = np.asarray(Q, dtype=np.float32)
+        self.R = np.asarray(R, dtype=np.float32)
+        if self.Q.shape != (2, 2):
+            raise ValueError(f"Q must have shape (2, 2), got {self.Q.shape}.")
+        if self.R.shape != (1, 1):
+            raise ValueError(f"R must have shape (1, 1), got {self.R.shape}.")
+
+    def _compute_rewards_batch(
+        self, obs: np.ndarray, actions: np.ndarray
+    ) -> np.ndarray:
+        # obs: [N, 4], actions: [N, 1]
+        tracking_error = obs[:, :2] - obs[:, 2:4]
+        state_cost = np.einsum("bi,ij,bj->b", tracking_error, self.Q, tracking_error)
+        action_cost = np.einsum("bi,ij,bj->b", actions, self.R, actions)
+        return -(state_cost + action_cost).astype(np.float32)
+
+    def get_reward(self, obs: np.ndarray, action: np.ndarray) -> float:
+        obs_arr = np.asarray(obs, dtype=np.float32).reshape(1, 4)
+        act_arr = np.asarray(action, dtype=np.float32).reshape(1, 1)
+        return float(self._compute_rewards_batch(obs_arr, act_arr)[0])
+
+    def predict_processed(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        next_state: Optional[np.ndarray] = None,
+        dones: Optional[np.ndarray] = None,
+        update_stats: bool = False,
+    ) -> np.ndarray:
+        """Return per-step rewards in a RewardNet-like interface."""
+        del next_state, dones, update_stats
+        state_arr = np.asarray(state, dtype=np.float32)
+        action_arr = np.asarray(action, dtype=np.float32)
+        if state_arr.ndim == 1:
+            state_arr = state_arr.reshape(1, 4)
+        if action_arr.ndim == 0:
+            action_arr = action_arr.reshape(1, 1)
+        elif action_arr.ndim == 1:
+            action_arr = action_arr.reshape(-1, 1)
+        return self._compute_rewards_batch(state_arr, action_arr)
+
 
 class DoubleIntegratorSuboptimalPolicy(NonTrainablePolicy):
     """Wraps the feedback-gain suboptimal expert as an SB3-compatible policy.
@@ -531,24 +613,41 @@ class DoubleIntegratorSuboptimalPolicy(NonTrainablePolicy):
         self.env = DoubleIntegratorEnv()
         self.K_position = 1.2176
         self.K_velocity = 1.6073
+        self.reward_wrapper = DoubleIntegratorTrackingReward()
 
     def _choose_action(self, obs: np.ndarray) -> np.ndarray:
         # obs: [..., 4] — physical state in dims 0:2, reference in dims 2:4
         state = obs[..., :2]
         reference_state = obs[..., 2:]
-        return self.env.suboptimal_expert(state, reference_state, self.K_position, self.K_velocity)
+        return self.env.suboptimal_expert(
+            state, reference_state, self.K_position, self.K_velocity
+        )
 
     def set_K_values(self, K_position: float, K_velocity: float):
         self.K_position = K_position
         self.K_velocity = K_velocity
+
+    def set_reward_matrices(self, Q: np.ndarray, R: np.ndarray):
+        self.reward_wrapper.set_reward_matrices(Q, R)
+
+    def get_reward(self, state: np.ndarray, action: np.ndarray) -> float:
+        return self.reward_wrapper.get_reward(state, action)
 
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     # Test the reference trajectory generator and suboptimal policy
-    env = DoubleIntegratorEnv(max_episode_seconds=200.0, dt=0.01, max_position=50.0, max_velocity=50.0, max_acceleration=50.0)
-    ref_traj = generate_reference_trajectory(T=env.max_episode_steps, dt=env.dt, mode="constant", target_position=2.0)
+    env = DoubleIntegratorEnv(
+        max_episode_seconds=200.0,
+        dt=0.01,
+        max_position=50.0,
+        max_velocity=50.0,
+        max_acceleration=50.0,
+    )
+    ref_traj = generate_reference_trajectory(
+        T=env.max_episode_steps, dt=env.dt, mode="constant", target_position=2.0
+    )
     suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
         observation_space=env.observation_space,
         action_space=env.action_space,
@@ -563,15 +662,18 @@ if __name__ == "__main__":
     options = {"max_episode_seconds": 40.0, "dt": 0.1, "reference_trajectory": ref_traj}
     env2 = gym.make(spec, **options)
 
-
     obs, info = env.reset(options={"reference_trajectory": ref_traj})
     states = [obs.copy()]
     actions = []
     for step in range(env.max_episode_steps):
-        action = suboptimal_policy._choose_action(obs)  
+        action = suboptimal_policy._choose_action(obs)
         obs, reward, terminated, truncated, info = env.step(action)
         states.append(obs.copy())
-        actions.append(action.reshape(1,))
+        actions.append(
+            action.reshape(
+                1,
+            )
+        )
         if terminated or truncated:
             break
     print(states[-1])

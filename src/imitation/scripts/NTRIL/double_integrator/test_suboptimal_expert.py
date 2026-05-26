@@ -8,7 +8,10 @@ import matplotlib.pyplot as plt
 
 from imitation.scripts.NTRIL.robust_tube_mpc import RobustTubeMPC
 from stable_baselines3 import PPO, SAC
-from imitation.scripts.NTRIL.double_integrator.double_integrator import DoubleIntegratorSuboptimalPolicy, generate_reference_trajectory
+from imitation.scripts.NTRIL.double_integrator.double_integrator import (
+    DoubleIntegratorSuboptimalPolicy,
+    generate_reference_trajectory,
+)
 from imitation.data import types
 
 
@@ -27,24 +30,31 @@ ACTIVE_MODELS = [
     # "drex",
     "suboptimal",
     # "mpc",
-    "airl",
-#     "ssrr",
+    # "airl",
+    "ssrr",
 ]
 
 # ---------------------------------------------------------------------------
 # Per-model display settings used when plotting.
 # ---------------------------------------------------------------------------
 MODEL_STYLE = {
-    "ntril":      {"color": "k", "linestyle": "-",  "label": "NTRIL Final Policy"},
-    "drex":       {"color": "g", "linestyle": "-",  "label": "DREX Policy"},
+    "ntril": {"color": "k", "linestyle": "-", "label": "NTRIL Final Policy"},
+    "drex": {"color": "g", "linestyle": "-", "label": "DREX Policy"},
     "suboptimal": {"color": "b", "linestyle": "--", "label": "Suboptimal Policy"},
-    "mpc":        {"color": "r", "linestyle": "-",  "label": "MPC"},
-    "airl":       {"color": "y", "linestyle": "--", "label": "AIRL"},
-    "ssrr":       {"color": "c", "linestyle": "-",  "label": "SSRR"},
+    "mpc": {"color": "r", "linestyle": "-", "label": "MPC"},
+    "airl": {"color": "y", "linestyle": "--", "label": "AIRL"},
+    "ssrr": {"color": "c", "linestyle": "-", "label": "SSRR"},
 }
 
 
-def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, disturbance_vertices, reference_trajectory):
+def build_models(
+    active_models,
+    dt,
+    max_episode_seconds,
+    disturbance_magnitude,
+    disturbance_vertices,
+    reference_trajectory,
+):
     """Instantiate only the requested models and their environments.
 
     Returns a dict keyed by model name, each value being a dict with:
@@ -63,9 +73,7 @@ def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, 
     models = {}
 
     if "ntril" in active_models:
-        ntril_path = (
-            SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
-        )
+        ntril_path = SCRIPT_DIR / "ntril_outputs" / "final_policy" / "final_policy.zip"
         policy = PPO.load(ntril_path, device="cuda")
         models["ntril"] = {
             "env": gym.make(env_id, **env_kwargs),
@@ -123,11 +131,11 @@ def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, 
         models["mpc"] = {
             "env": env,
             "predict": lambda obs, p=policy: p.solve_mpc(obs)[1],
-            "reset": lambda obs, p=policy: p.reset_episode(obs[:p.state_dim]),
+            "reset": lambda obs, p=policy: p.reset_episode(obs[: p.state_dim]),
         }
 
     if "airl" in active_models:
-        airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260501_224503_constant_P0.0/initial_BC_policy/bc_policy.zip" # for debugging initial BC policy
+        airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260501_224503_constant_P0.0/initial_BC_policy/bc_policy.zip"  # for debugging initial BC policy
         # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260501_221911_constant_P0.0/best_checkpoint/learner_policy.zip"
         # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/final_policy/learner_policy.zip"
         # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_224617_sinusoidal_A1.0_f0.01/best_checkpoint/learner_policy.zip"
@@ -139,7 +147,7 @@ def build_models(active_models, dt, max_episode_seconds, disturbance_magnitude, 
         }
 
     if "ssrr" in active_models:
-        ssrr_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/ssrr_rl/latest/ssrr_rl_policy.zip"
+        ssrr_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/ssrr_rl/20260501_221114/ssrr_rl_policy.zip"
         policy = SAC.load(ssrr_path, device="cuda")
         models["ssrr"] = {
             "env": gym.make(env_id, **env_kwargs),
@@ -154,23 +162,35 @@ def main():
     dt = 1.0
     max_episode_seconds = 200.0
     disturbance_magnitude = 0.0
-    disturbance_vertices = np.array([
-        [ disturbance_magnitude,  disturbance_magnitude],
-        [-disturbance_magnitude, -disturbance_magnitude],
-        [-disturbance_magnitude,  disturbance_magnitude],
-        [ disturbance_magnitude, -disturbance_magnitude],
-    ])
+    disturbance_vertices = np.array(
+        [
+            [disturbance_magnitude, disturbance_magnitude],
+            [-disturbance_magnitude, -disturbance_magnitude],
+            [-disturbance_magnitude, disturbance_magnitude],
+            [disturbance_magnitude, -disturbance_magnitude],
+        ]
+    )
     max_episode_steps = int(max_episode_seconds / dt)
 
-    # reference_trajectory = generate_reference_trajectory(
-    #     T=max_episode_steps, dt=dt, mode="sinusoidal", amplitude=1.0, frequency=0.01, phase=0.0
-    # )
     reference_trajectory = generate_reference_trajectory(
-        T=max_episode_steps, dt=dt, mode="constant", target_position=0.0
+        T=max_episode_steps,
+        dt=dt,
+        mode="sinusoidal",
+        amplitude=1.0,
+        frequency=0.01,
+        phase=0.0,
     )
+    # reference_trajectory = generate_reference_trajectory(
+    #     T=max_episode_steps, dt=dt, mode="constant", target_position=0.0
+    # )
 
     models = build_models(
-        ACTIVE_MODELS, dt, max_episode_seconds, disturbance_magnitude, disturbance_vertices, reference_trajectory
+        ACTIVE_MODELS,
+        dt,
+        max_episode_seconds,
+        disturbance_magnitude,
+        disturbance_vertices,
+        reference_trajectory,
     )
 
     initial_state = np.random.uniform(-2.0, 2.0, size=(2,)).astype(np.float32)
@@ -187,10 +207,10 @@ def main():
             if m["reset"] is not None:
                 m["reset"](obs)
 
-        states   = {name: [obs_per_model[name].copy()] for name in models}
-        actions  = {name: [] for name in models}
-        rewards  = {name: [] for name in models}
-        dones    = {name: False for name in models}
+        states = {name: [obs_per_model[name].copy()] for name in models}
+        actions = {name: [] for name in models}
+        rewards = {name: [] for name in models}
+        dones = {name: False for name in models}
 
         # Determine episode length from the first active env
         ref_env = next(iter(models.values()))["env"]
@@ -229,7 +249,9 @@ def main():
         plt.close()
 
         for name in models:
-            print(f"Total {MODEL_STYLE.get(name, {}).get('label', name)} cost: {sum(rewards[name]):.4f}")
+            print(
+                f"Total {MODEL_STYLE.get(name, {}).get('label', name)} cost: {sum(rewards[name]):.4f}"
+            )
 
 
 if __name__ == "__main__":

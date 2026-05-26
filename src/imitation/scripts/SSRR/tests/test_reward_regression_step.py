@@ -2,6 +2,7 @@ import os
 import pickle
 import numpy as np
 import torch as th
+import argparse
 import tqdm
 import matplotlib.pyplot as plt
 import torch
@@ -10,8 +11,16 @@ from datetime import datetime
 from stable_baselines3 import PPO, SAC
 
 from imitation.rewards.reward_nets import BasicRewardNet
-from imitation.scripts.SSRR.reward_regression import SSRRRegressor, SnippetDataset, make_dataloader
-from imitation.scripts.SSRR.curve_fit import estimate_airl_returns_by_noise, fit_sigmoid_noise_performance, _sigmoid
+from imitation.scripts.SSRR.reward_regression import (
+    SSRRRegressor,
+    SnippetDataset,
+    make_dataloader,
+)
+from imitation.scripts.SSRR.curve_fit import (
+    estimate_suboptimal_returns_by_noise,
+    fit_sigmoid_noise_performance,
+    _sigmoid,
+)
 from imitation.scripts.SSRR.noise_rollouts import generate_noisy_rollout_buckets
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.util import util
@@ -19,8 +28,11 @@ from imitation.util.networks import RunningNorm
 from imitation.scripts.SSRR.types import SigmoidParams, SSRRRegressionConfig
 from imitation.rewards.reward_wrapper import RewardVecEnvWrapper
 from imitation.scripts.SSRR.reporting import write_rl_run_report
-from imitation.scripts.SSRR.util import plot_learned_reward
-
+from imitation.scripts.SSRR.util import plot_learned_reward, plot_learned_reward_time, plot_learned_reward_time_slider
+from imitation.scripts.NTRIL.double_integrator.double_integrator import (
+    DoubleIntegratorSuboptimalPolicy,
+    DoubleIntegratorTrackingReward,
+)
 
 
 def test_reward_regression_loss_decreases_simple():
@@ -41,8 +53,8 @@ def test_reward_regression_loss_decreases_simple():
     reg = SSRRRegressor(net, lr=1e-2, weight_decay=0.0, device="cpu")
 
     # Build a "dataloader-like" iterable that yields fixed batches.
-    obs = th.zeros((6, obs_dim), dtype=th.float32)      # L+1=6
-    acts = th.zeros((5, act_dim), dtype=th.float32)     # L=5
+    obs = th.zeros((6, obs_dim), dtype=th.float32)  # L+1=6
+    acts = th.zeros((5, act_dim), dtype=th.float32)  # L=5
     targets = th.zeros((4,), dtype=th.float32)
 
     batch = ([obs] * 4, [acts] * 4, targets)
@@ -53,20 +65,32 @@ def test_reward_regression_loss_decreases_simple():
 
 
 if __name__ == "__main__":
-    ''' Test reward regression step of SSRR.
-    '''
+    """Test reward regression step of SSRR."""
     from pathlib import Path
+
     SCRIPT_DIR = Path(__file__).parent.resolve()
 
-    AIRL_RUN = "20260501_221911_constant_P0.0"
-    airl_run_dir = SCRIPT_DIR / "airl_outputs" / AIRL_RUN
-    # force_retrain = ["reward_regression", "rl_training"]
+    # Device
+    device = "cuda" if th.cuda.is_available() else "cpu"
+
+    # # argparse
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument(
+    #     "--force_retrain", type=str, default="reward_regression,rl_training"
+    # )
+    # parser.add_argument("--use_airl", type=bool, default=False)
+    # args = parser.parse_args()
+    # force_retrain = args.force_retrain.split(",")
+    use_airl = True
     force_retrain = []
+
     # Set random generator
     rngs = np.random.default_rng(42)
 
-    # Load reference trajectory
-    reference_trajectory = np.load(airl_run_dir / "reference_trajectory.npy")
+    # Load reference trajectory (for now just hardcode path)
+    reference_trajectory = np.load(
+        "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/reference_trajectory.npy"
+    )
 
     # Environment and simulation parameters
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
@@ -80,7 +104,6 @@ if __name__ == "__main__":
         "reference_trajectory": reference_trajectory,
         "disturbance_magnitude": 0.0,
     }
-
     venv = util.make_vec_env(
         env_id,
         rng=rngs,
@@ -90,63 +113,160 @@ if __name__ == "__main__":
         env_make_kwargs=env_options,
     )
 
-    # Load AIRL policy trained on double integrator and associated reward network
-    airl_gen = PPO.load(airl_run_dir / "best_checkpoint" / "learner_policy")
-    airl_policy = airl_gen.policy
+    # Load AIRL or basic suboptimal policy trained on double integrator and associated reward network
+    if use_airl: #args.use_airl:
 
-    airl_reward_net = BasicRewardNet(
-        observation_space=venv.observation_space,
-        action_space=venv.action_space,
-        normalize_input_layer=RunningNorm,
-    )
-    airl_reward_weights = torch.load(airl_run_dir / "best_checkpoint" / "reward_net.pt", weights_only=True)
-    airl_reward_net.load_state_dict(airl_reward_weights)
+        AIRL_RUN = "20260420_231943_sinusoidal_A1.0_f0.01"
+        airl_run_dir = SCRIPT_DIR / "airl_outputs" / AIRL_RUN
 
+        RUN = AIRL_RUN
 
-    # Stage output directories (must already exist from test_curve_fit_sigmoid.py)
-    noisy_rollouts_dir = airl_run_dir / "noisy_rollouts"
-    sigmoid_fit_dir = airl_run_dir / "sigmoid_fit"
-    ssrr_regression_dir = airl_run_dir / "ssrr_regression"
-    ssrr_rl_dir = airl_run_dir / "ssrr_rl"
-    ssrr_regression_dir.mkdir(parents=True, exist_ok=True)
-    ssrr_rl_dir.mkdir(parents=True, exist_ok=True)
+        airl_gen = PPO.load(airl_run_dir / "best_checkpoint" / "learner_policy")
+        airl_policy = airl_gen.policy
 
-    # Check if noisy trajectories are already generated in that trained AIRL policy
-    force_generate_noisy_trajectories = "noisy_rollouts" in force_retrain
-    noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
-    if os.path.exists(noisy_trajectories_path) and not force_generate_noisy_trajectories:
-        noisy_trajectories = pickle.load(open(noisy_trajectories_path, "rb"))
-    else:
-        noisy_rollouts_dir.mkdir(parents=True, exist_ok=True)
-        # Generate noisy trajectories
-        noisy_trajectories = generate_noisy_rollout_buckets(base_policy=airl_policy, 
-                                                            noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
-                                                            n_rollouts_per_noise=5, rng=np.random.default_rng(0),
-                                                            venv=venv,
-                                                            reference_trajectory=reference_trajectory,
+        airl_reward_net = BasicRewardNet(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+            normalize_input_layer=RunningNorm,
         )
-        pickle.dump(noisy_trajectories, open(noisy_trajectories_path, "wb"))
+        airl_reward_weights = torch.load(
+            airl_run_dir / "best_checkpoint" / "reward_net.pt", weights_only=True
+        )
+        airl_reward_net.load_state_dict(airl_reward_weights)
 
-    # Load sigmoid params (produced by test_curve_fit_sigmoid.py) if not already loaded
-    sigmoid_params_path = sigmoid_fit_dir / "sigmoid_params.npy"
-    if os.path.exists(sigmoid_params_path):
-        sigmoid_params = np.load(sigmoid_params_path)
+        reward_net = airl_reward_net
+
+        # Stage output directories
+        noisy_rollouts_dir = airl_run_dir / "noisy_rollouts"
+        sigmoid_fit_dir = airl_run_dir / "sigmoid_fit"
+        ssrr_regression_dir = airl_run_dir / "ssrr_regression"
+        ssrr_rl_dir = airl_run_dir / "ssrr_rl"
+        trained_reward_dir = airl_run_dir / "trained_reward"
+        ssrr_regression_dir.mkdir(parents=True, exist_ok=True)
+        ssrr_rl_dir.mkdir(parents=True, exist_ok=True)
+        trained_reward_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if noisy trajectories are already generated in that trained AIRL policy
+        force_generate_noisy_trajectories = False
+        noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
+        if (
+            os.path.exists(noisy_trajectories_path)
+            and not force_generate_noisy_trajectories
+        ):
+            noisy_trajectories = pickle.load(open(noisy_trajectories_path, "rb"))
+        else:
+            # Generate noisy trajectories
+            noisy_trajectories = generate_noisy_rollout_buckets(
+                base_policy=airl_policy,
+                noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+                n_rollouts_per_noise=5,
+                rng=rngs,
+                venv=venv,
+                reference_trajectory=reference_trajectory,
+            )
+            pickle.dump(noisy_trajectories, open(noisy_trajectories_path, "wb"))
+
+        # Load sigmoid params (produced by test_curve_fit_sigmoid.py) if not already loaded
+        sigmoid_params_path = sigmoid_fit_dir / "sigmoid_params.npy"
+        if os.path.exists(sigmoid_params_path):
+            sigmoid_params = np.load(sigmoid_params_path)
+        else:
+            # Fit sigmoid
+            noise_performance_data = estimate_suboptimal_returns_by_noise(
+                buckets=noisy_trajectories, suboptimal_reward=reward_net
+            )
+            sigmoid_params, diag = fit_sigmoid_noise_performance(
+                noise_performance_data, normalize_y=True, prefer_scipy=True
+            )
+            np.save(
+                sigmoid_params_path,
+                np.asarray(sigmoid_params.as_tuple(), dtype=np.float64),
+            )
+
+        sigmoid_params = SigmoidParams(
+            x0=sigmoid_params[0],
+            y0=sigmoid_params[1],
+            c=sigmoid_params[2],
+            k=sigmoid_params[3],
+        )
+
     else:
-        # Fit sigmoid
-        noise_performance_data = estimate_airl_returns_by_noise(buckets = noisy_trajectories, airl_reward = airl_reward_net)
-        sigmoid_params, diag = fit_sigmoid_noise_performance(noise_performance_data, normalize_y=True, prefer_scipy=True)
-        np.save(sigmoid_params_path, np.asarray(sigmoid_params.as_tuple(), dtype=np.float64))
 
-    sigmoid_params = SigmoidParams(x0=sigmoid_params[0], y0=sigmoid_params[1], c=sigmoid_params[2], k=sigmoid_params[3])
+        SUBOPTIMAL_RUN = "20260420_231943_sinusoidal_A1.0_f0.01"
+        suboptimal_run_dir = SCRIPT_DIR / "suboptimal_outputs" / SUBOPTIMAL_RUN
 
-    # Device
-    device = "cuda" if th.cuda.is_available() else "cpu"
+        RUN = SUBOPTIMAL_RUN
+
+        suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+        )
+        suboptimal_policy.set_K_values(0.02, 0.3)
+        suboptimal_reward_net = DoubleIntegratorTrackingReward()
+        suboptimal_reward_net.set_reward_matrices(
+            Q=venv.get_attr("Q", 0)[0], R=venv.get_attr("R", 0)[0]
+        )
+        reward_net = suboptimal_reward_net
+
+        # Stage output directories
+        noisy_rollouts_dir = suboptimal_run_dir / "noisy_rollouts"
+        sigmoid_fit_dir = suboptimal_run_dir / "sigmoid_fit"
+        ssrr_regression_dir = suboptimal_run_dir / "ssrr_regression"
+        ssrr_rl_dir = suboptimal_run_dir / "ssrr_rl"
+        ssrr_regression_dir.mkdir(parents=True, exist_ok=True)
+        ssrr_rl_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if noisy trajectories are already generated in that trained AIRL policy
+        force_generate_noisy_trajectories = False
+        noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
+        if (
+            os.path.exists(noisy_trajectories_path)
+            and not force_generate_noisy_trajectories
+        ):
+            noisy_trajectories = pickle.load(open(noisy_trajectories_path, "rb"))
+        else:
+            # Generate noisy trajectories
+            noisy_trajectories = generate_noisy_rollout_buckets(
+                base_policy=suboptimal_policy,
+                noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+                n_rollouts_per_noise=5,
+                rng=rngs,
+                venv=venv,
+                reference_trajectory=reference_trajectory,
+            )
+            pickle.dump(noisy_trajectories, open(noisy_trajectories_path, "wb"))
+
+        # Load sigmoid params (produced by test_curve_fit_sigmoid.py) if not already loaded
+        sigmoid_params_path = sigmoid_fit_dir / "sigmoid_params.npy"
+        if os.path.exists(sigmoid_params_path):
+            sigmoid_params = np.load(sigmoid_params_path)
+        else:
+            # Fit sigmoid
+            noise_performance_data = estimate_suboptimal_returns_by_noise(
+                buckets=noisy_trajectories, suboptimal_reward=reward_net
+            )
+            sigmoid_params, diag = fit_sigmoid_noise_performance(
+                noise_performance_data, normalize_y=True, prefer_scipy=True
+            )
+            np.save(
+                sigmoid_params_path,
+                np.asarray(sigmoid_params.as_tuple(), dtype=np.float64),
+            )
+
+        sigmoid_params = SigmoidParams(
+            x0=sigmoid_params[0],
+            y0=sigmoid_params[1],
+            c=sigmoid_params[2],
+            k=sigmoid_params[3],
+        )
 
     # Train/load an ensemble of SSRR reward regressors (mirrors NTRILTrainer pattern).
     n_ensemble = 3
     ensemble_dir = ssrr_regression_dir / "ensemble"
     ensemble_dir.mkdir(parents=True, exist_ok=True)
-    ensemble_reward_paths = [ensemble_dir / f"ssrr_reward_{i}.pt" for i in range(n_ensemble)]
+    ensemble_reward_paths = [
+        ensemble_dir / f"ssrr_reward_{i}.pt" for i in range(n_ensemble)
+    ]
     all_cached = all(os.path.exists(path) for path in ensemble_reward_paths)
 
     # Regression hyperparameters aligned with NTRILTrainer._train_reward_network defaults.
@@ -169,8 +289,7 @@ if __name__ == "__main__":
     )
 
     # Reward network initialization
-    reward_net_init = {
-        "custom_init": True}
+    reward_net_init = {"custom_init": True}
 
     force_reward_regression_train = "reward_regression" in force_retrain
     reward_nets_ensemble = []
@@ -186,7 +305,9 @@ if __name__ == "__main__":
             reward_nets_ensemble.append(reward_network)
     else:
         for i in range(n_ensemble):
-            print(f"\n[Ensemble {i + 1}/{n_ensemble}] Training SSRR reward regressor...")
+            print(
+                f"\n[Ensemble {i + 1}/{n_ensemble}] Training SSRR reward regressor..."
+            )
             reward_network = BasicRewardNet(
                 observation_space=venv.observation_space,
                 action_space=venv.action_space,
@@ -210,20 +331,25 @@ if __name__ == "__main__":
             th.save(regressor.reward_net.state_dict(), ensemble_reward_paths[i])
             reward_nets_ensemble.append(regressor.reward_net)
 
+    # Save RL policy and all training details (reward nets, etc) under a datetime-stamped subdirectory
+    rl_run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    rl_run_dir = ssrr_rl_dir / rl_run_name
+    rl_run_dir.mkdir(parents=True, exist_ok=True)
+
     # Plot the mean learned reward surface over (position, velocity).
     # Mirrors the contour visualisation in NTRIL/double_integrator/util.py.
-    plot_learned_reward(
+    fig, ax, slider =plot_learned_reward_time_slider(
         ensemble=reward_nets_ensemble,
         observation_space=venv.observation_space,
         action_space=venv.action_space,
-        ref_pos=0.0,
-        ref_vel=0.0,
         n_grid=100,
+        max_frames=250,
         device=device,
         reference_trajectory=reference_trajectory,
-        out_path=ssrr_regression_dir / "reward_contour.png",
-        title=f"SSRR mean learned reward  |  run={AIRL_RUN}",
+        out_path=rl_run_dir / "reward_contour_time.png",
+        title=f"SSRR mean learned reward  |  run={RUN}",
     )
+    plt.show()
 
     # Train RL policy on SSRR reward
     def ensemble_reward_fn(obs, acts, next_obs, dones):
@@ -270,7 +396,7 @@ if __name__ == "__main__":
 
         def __call__(self, locals_, globals_):
             # Called every rollout
-            num_timesteps = locals_['self'].num_timesteps
+            num_timesteps = locals_["self"].num_timesteps
             steps = num_timesteps - self.last_steps
             if steps > 0:
                 self.pbar.update(steps)
@@ -281,23 +407,20 @@ if __name__ == "__main__":
 
     tqdm_callback = TqdmCallback(total_timesteps=rl_total_timesteps)
     rl_policy_path = ssrr_rl_dir / "ssrr_rl_policy.zip"
-    # Save RL policy under a datetime-stamped subdirectory
-    rl_run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-    rl_run_dir = ssrr_rl_dir / rl_run_name
-    rl_run_dir.mkdir(parents=True, exist_ok=True)
     if os.path.exists(rl_policy_path) and "rl_training" not in force_retrain:
         rl_policy = SAC.load(rl_policy_path, device=device)
     else:
-        rl_policy.learn(total_timesteps=rl_total_timesteps, log_interval=10, callback=tqdm_callback)
+        rl_policy.learn(
+            total_timesteps=rl_total_timesteps, log_interval=10, callback=tqdm_callback
+        )
         rl_policy.save(rl_run_dir / "ssrr_rl_policy")
         # also save as latest
         rl_policy.save(rl_policy_path)
 
-
     write_rl_run_report(
         run_dir=rl_run_dir,
         run_name=rl_run_name,
-        airl_run=AIRL_RUN,
+        airl_run=RUN,
         env_id=env_id,
         max_episode_seconds=max_episode_seconds,
         dt=dt,

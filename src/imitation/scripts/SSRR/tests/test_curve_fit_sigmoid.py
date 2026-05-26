@@ -1,7 +1,12 @@
+"""
+After training AIRL policy and generating noisy rollouts, we fit a sigmoid to the noise-reward curve.
+"""
+
 import os
 import pickle
 from pathlib import Path
 from typing import Optional, Sequence
+import argparse
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,13 +15,24 @@ import torch
 from stable_baselines3 import PPO
 
 
-from imitation.scripts.SSRR.curve_fit import estimate_airl_returns_by_noise, fit_sigmoid_noise_performance, _sigmoid
+from imitation.scripts.SSRR.curve_fit import (
+    estimate_suboptimal_returns_by_noise,
+    fit_sigmoid_noise_performance,
+    _sigmoid,
+)
+from imitation.data import rollout
+from imitation.algorithms import bc
+
 from imitation.scripts.SSRR.types import NoiseBucket, NoisePerformanceData
 from imitation.util import util
 from imitation.scripts.SSRR.noise_rollouts import generate_noisy_rollout_buckets
 from imitation.data.wrappers import RolloutInfoWrapper
 from imitation.rewards.reward_nets import BasicRewardNet
 from imitation.util.networks import RunningNorm
+from imitation.scripts.NTRIL.double_integrator.double_integrator import (
+    DoubleIntegratorSuboptimalPolicy,
+    DoubleIntegratorTrackingReward,
+)
 
 
 def test_sigmoid_fit_high_r2_on_synthetic():
@@ -33,7 +49,9 @@ def test_sigmoid_fit_high_r2_on_synthetic():
         returns_std=np.zeros_like(y_noisy),
         returns_all=None,
     )
-    params, diag = fit_sigmoid_noise_performance(data, normalize_y=True, prefer_scipy=True)
+    params, diag = fit_sigmoid_noise_performance(
+        data, normalize_y=True, prefer_scipy=True
+    )
 
     data = [x, y_noisy, y_true]
 
@@ -43,6 +61,7 @@ def test_sigmoid_fit_high_r2_on_synthetic():
     assert params.k < 0.0
 
     return params, diag, data
+
 
 def plot_trajectories_by_noise_level(
     noisy_trajectories: Sequence[NoiseBucket],
@@ -103,15 +122,20 @@ def plot_trajectories_by_noise_level(
         fig.suptitle(f"Trajectories — η = {eta:.2f}", fontsize=12)
 
         # Reference trajectory.
-        ax.plot(ref_t, ref_pos, color="k", linewidth=1.5,
-                linestyle="--", label="Reference")
+        ax.plot(
+            ref_t, ref_pos, color="k", linewidth=1.5, linestyle="--", label="Reference"
+        )
 
         # AIRL (noise-free) trajectories.
         for k, traj in enumerate(airl_trajs):
             t = np.arange(len(traj.obs))
-            ax.plot(t, traj.obs[:, obs_dim_idx], color="b",
-                    linewidth=1.2,
-                    label="AIRL" if k == 0 else "_nolegend_")
+            ax.plot(
+                t,
+                traj.obs[:, obs_dim_idx],
+                color="b",
+                linewidth=1.2,
+                label="AIRL" if k == 0 else "_nolegend_",
+            )
 
         # Noisy trajectories for this bucket.
         if eta in buckets_by_level:
@@ -119,9 +143,13 @@ def plot_trajectories_by_noise_level(
             # noise_color = colormap(eta) if eta > airl_noise_level else "steelblue"
             for k, traj in enumerate(noisy_trajs):
                 t = np.arange(len(traj.obs))
-                ax.plot(t, traj.obs[:, obs_dim_idx], color="r",
-                        linewidth=0.9,
-                        label=f"Noisy ({eta:.2f})" if k == 0 else "_nolegend_")
+                ax.plot(
+                    t,
+                    traj.obs[:, obs_dim_idx],
+                    color="r",
+                    linewidth=0.9,
+                    label=f"Noisy ({eta:.2f})" if k == 0 else "_nolegend_",
+                )
 
         ax.set_xlabel("Time step", fontsize=10)
         ax.set_ylabel(obs_dim_label, fontsize=10)
@@ -142,18 +170,16 @@ def plot_trajectories_by_noise_level(
 
 
 if __name__ == "__main__":
-    ''' Test sigmoid fit on noisy trajectories generated from AIRL policy trained on double integrator.
-    '''
+    """Test sigmoid fit on noisy trajectories generated from AIRL policy trained on double integrator."""
     SCRIPT_DIR = Path(__file__).parent.resolve()
 
-    AIRL_RUN = "20260420_231943_sinusoidal_A1.0_f0.01"
-    airl_run_dir = SCRIPT_DIR / "airl_outputs" / AIRL_RUN
-
     # Set random generator
-    rngs = np.random.default_rng(42)
+    rngs = np.random.default_rng(0)
 
-    # Load reference trajectory
-    reference_trajectory = np.load(airl_run_dir / "reference_trajectory.npy")
+    # Load reference trajectory (for now just hardcode path)
+    reference_trajectory = np.load(
+        "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/reference_trajectory.npy"
+    )
 
     # Environment and simulation parameters
     env_id = "imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0"
@@ -167,7 +193,6 @@ if __name__ == "__main__":
         "reference_trajectory": reference_trajectory,
         "disturbance_magnitude": 0.0,
     }
-
     venv = util.make_vec_env(
         env_id,
         rng=rngs,
@@ -177,81 +202,158 @@ if __name__ == "__main__":
         env_make_kwargs=env_options,
     )
 
-    # Load AIRL policy trained on double integrator and associated reward network
-    airl_gen = PPO.load(airl_run_dir / "best_checkpoint" / "learner_policy")
-    airl_policy = airl_gen.policy
+    # Load AIRL or basic suboptimal policy trained on double integrator and associated reward network
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--use_airl", type=bool, default=False)
+    args = parser.parse_args()
+    use_airl = args.use_airl
 
-    airl_reward_net = BasicRewardNet(
-        observation_space=venv.observation_space,
-        action_space=venv.action_space,
-        normalize_input_layer=RunningNorm,
-    )
-    airl_reward_weights = torch.load(airl_run_dir / "best_checkpoint" / "reward_net.pt", weights_only=True)
-    airl_reward_net.load_state_dict(airl_reward_weights)
+    if use_airl:
 
+        AIRL_RUN = "20260420_231943_sinusoidal_A1.0_f0.01"
+        airl_run_dir = SCRIPT_DIR / "airl_outputs" / AIRL_RUN
 
-    # Stage output directories
-    noisy_rollouts_dir = airl_run_dir / "noisy_rollouts"
-    sigmoid_fit_dir = airl_run_dir / "sigmoid_fit"
-    noisy_rollouts_dir.mkdir(parents=True, exist_ok=True)
-    sigmoid_fit_dir.mkdir(parents=True, exist_ok=True)
+        airl_gen = PPO.load(airl_run_dir / "best_checkpoint" / "learner_policy")
+        airl_policy = airl_gen.policy
 
-    # Check if noisy trajectories are already generated in that trained AIRL policy
-    force_generate_noisy_trajectories = False
-    noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
-    if os.path.exists(noisy_trajectories_path) and not force_generate_noisy_trajectories:
-        noisy_trajectories = pickle.load(open(noisy_trajectories_path, "rb"))
-    else:
-        # Generate noisy trajectories
-        noisy_trajectories = generate_noisy_rollout_buckets(base_policy=airl_policy, 
-                                                            noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
-                                                            n_rollouts_per_noise=5, rng=np.random.default_rng(0),
-                                                            venv=venv,
-                                                            reference_trajectory=reference_trajectory,
+        airl_reward_net = BasicRewardNet(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+            normalize_input_layer=RunningNorm,
         )
-        pickle.dump(noisy_trajectories, open(noisy_trajectories_path, "wb"))
+        airl_reward_weights = torch.load(
+            airl_run_dir / "best_checkpoint" / "reward_net.pt", weights_only=True
+        )
+        airl_reward_net.load_state_dict(airl_reward_weights)
 
-    # Plot trajectories by noise level
-    trajectories_plot_dir = airl_run_dir / "trajectory_plots"
-    trajectories_plot_dir.mkdir(parents=True, exist_ok=True)
-    plot_trajectories_by_noise_level(
-        noisy_trajectories=noisy_trajectories,
-        reference_trajectory=reference_trajectory,
-        output_path=trajectories_plot_dir / "trajectories_by_noise_level.png",
-    )
+        reward_net = airl_reward_net
+
+        # Stage output directories
+        noisy_rollouts_dir = airl_run_dir / "noisy_rollouts"
+        sigmoid_fit_dir = airl_run_dir / "sigmoid_fit"
+        noisy_rollouts_dir.mkdir(parents=True, exist_ok=True)
+        sigmoid_fit_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if noisy trajectories are already generated in that trained AIRL policy
+        force_generate_noisy_trajectories = True
+        noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
+        if (
+            os.path.exists(noisy_trajectories_path)
+            and not force_generate_noisy_trajectories
+        ):
+            noisy_trajectories = pickle.load(open(noisy_trajectories_path, "rb"))
+        else:
+            # Generate noisy trajectories
+            noisy_trajectories = generate_noisy_rollout_buckets(
+                base_policy=airl_policy,
+                noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+                n_rollouts_per_noise=5,
+                rng=rngs,
+                venv=venv,
+                reference_trajectory=reference_trajectory,
+            )
+            pickle.dump(noisy_trajectories, open(noisy_trajectories_path, "wb"))
+
+        # Plot trajectories by noise level
+        trajectories_plot_dir = airl_run_dir / "trajectory_plots"
+        trajectories_plot_dir.mkdir(parents=True, exist_ok=True)
+        plot_trajectories_by_noise_level(
+            noisy_trajectories=noisy_trajectories,
+            reference_trajectory=reference_trajectory,
+            output_path=trajectories_plot_dir / "trajectories_by_noise_level.png",
+        )
+
+    else:
+
+        SUBOPTIMAL_RUN = "20260420_231943_sinusoidal_A1.0_f0.01"
+        suboptimal_run_dir = SCRIPT_DIR / "suboptimal_outputs" / SUBOPTIMAL_RUN
+
+        suboptimal_policy = DoubleIntegratorSuboptimalPolicy(
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+        )
+        suboptimal_policy.set_K_values(0.02, 0.3)
+        suboptimal_reward_net = DoubleIntegratorTrackingReward()
+        suboptimal_reward_net.set_reward_matrices(
+            Q=venv.get_attr("Q", 0)[0], R=venv.get_attr("R", 0)[0]
+        )
+        reward_net = suboptimal_reward_net
+
+        # Stage output directories
+        noisy_rollouts_dir = suboptimal_run_dir / "noisy_rollouts"
+        sigmoid_fit_dir = suboptimal_run_dir / "sigmoid_fit"
+        print("sigmoid_fit_dir: ", sigmoid_fit_dir)
+        noisy_rollouts_dir.mkdir(parents=True, exist_ok=True)
+        sigmoid_fit_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if noisy trajectories are already generated in that trained AIRL policy
+        force_generate_noisy_trajectories = False
+        noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
+        if (
+            os.path.exists(noisy_trajectories_path)
+            and not force_generate_noisy_trajectories
+        ):
+            noisy_trajectories = pickle.load(open(noisy_trajectories_path, "rb"))
+        else:
+            # Generate noisy trajectories
+            noisy_trajectories = generate_noisy_rollout_buckets(
+                base_policy=suboptimal_policy,
+                noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+                n_rollouts_per_noise=5,
+                rng=rngs,
+                venv=venv,
+                reference_trajectory=reference_trajectory,
+            )
+            pickle.dump(noisy_trajectories, open(noisy_trajectories_path, "wb"))
+
+        # Plot trajectories by noise level
+        trajectories_plot_dir = suboptimal_run_dir / "trajectory_plots"
+        trajectories_plot_dir.mkdir(parents=True, exist_ok=True)
+        plot_trajectories_by_noise_level(
+            noisy_trajectories=noisy_trajectories,
+            reference_trajectory=reference_trajectory,
+            output_path=trajectories_plot_dir / "trajectories_by_noise_level.png",
+        )
 
     # Fit sigmoid
-    noise_performance_data = estimate_airl_returns_by_noise(buckets = noisy_trajectories, airl_reward = airl_reward_net)
-    sigmoid_params, diag = fit_sigmoid_noise_performance(noise_performance_data, normalize_y=True, prefer_scipy=True)
+    noise_performance_data = estimate_suboptimal_returns_by_noise(
+        buckets=noisy_trajectories, reward=reward_net
+    )
+    sigmoid_params, diag = fit_sigmoid_noise_performance(
+        noise_performance_data, normalize_y=True, prefer_scipy=True
+    )
     print(sigmoid_params)
 
     # Save sigmoid params
-    np.save(sigmoid_fit_dir / "sigmoid_params.npy", np.asarray(sigmoid_params.as_tuple(), dtype=np.float64))
+    np.save(
+        sigmoid_fit_dir / "sigmoid_params.npy",
+        np.asarray(sigmoid_params.as_tuple(), dtype=np.float64),
+    )
 
     # Plot sigmoid fit
     independent_noise_levels = np.linspace(0, 1.1, 1500)
     predicted_returns = _sigmoid(sigmoid_params, independent_noise_levels)
 
     total_noise_levels = []
-    
+
     for bucket in noisy_trajectories:
         for traj in bucket.trajectories:
-            total_noise_levels.append(traj.infos[0]['noise_level'])
+            total_noise_levels.append(traj.infos[0]["noise_level"])
 
     returns_all = noise_performance_data.returns_all
-    
+
     # Normalize returns_all to be between 0 and 1
-    returns_all = (returns_all - np.min(returns_all)) / (np.max(returns_all) - np.min(returns_all))
+    returns_all = (returns_all - np.min(returns_all)) / (
+        np.max(returns_all) - np.min(returns_all)
+    )
 
     plt.figure()
-    plt.scatter(total_noise_levels, returns_all, c='r', marker='.', label='Raw Returns')
-    plt.plot(independent_noise_levels, predicted_returns, 'b-', label='Fitted Returns')
-    plt.xlabel('Noise Level')
-    plt.ylabel('Normalized Return')
+    plt.scatter(total_noise_levels, returns_all, c="r", marker=".", label="Raw Returns")
+    plt.plot(independent_noise_levels, predicted_returns, "b-", label="Fitted Returns")
+    plt.xlabel("Noise Level")
+    plt.ylabel("Normalized Return")
+    plt.ylim([0, 1])
     plt.legend()
 
     plt.savefig(sigmoid_fit_dir / "sigmoid_fit.png")
     plt.close()
-
-    
-

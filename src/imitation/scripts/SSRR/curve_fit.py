@@ -26,11 +26,11 @@ def _resize_to_unit_interval(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
-def estimate_airl_returns_by_noise(
+def estimate_suboptimal_returns_by_noise(
     buckets: Sequence[NoiseBucket],
-    airl_reward: reward_nets.RewardNet,
+    reward: reward_nets.RewardNet,
 ) -> NoisePerformanceData:
-    """Compute AIRL-estimated cumulative returns per trajectory, grouped by noise.
+    """Compute AIRL/suboptimal-estimated cumulative returns per trajectory, grouped by noise.
 
     This corresponds to SSRR Phase 2’s y(eta) targets:
       y(eta) = mean_{tau ~ pi_eta} [ sum_t R_tilde(s_t, a_t) ]
@@ -49,7 +49,9 @@ def estimate_airl_returns_by_noise(
             cur_obs = obs[:-1]
             done = np.zeros(len(acts), dtype=np.float32)
             done[-1] = float(traj.terminal)
-            r = airl_reward.predict_processed(cur_obs, acts, next_obs, done, update_stats=False)
+            r = reward.predict_processed(
+                cur_obs, acts, next_obs, done, update_stats=False
+            )
             returns.append(float(np.sum(r)))
         returns_all.append(returns)
         returns_arr = np.asarray(returns, dtype=np.float64)
@@ -85,10 +87,11 @@ def fit_sigmoid_noise_performance_from_buckets(
             total_rewards.append(traj.infos["total_reward"])
         total_rewards = np.reshape(total_rewards, (-1,))
         mean_rewards.append(np.mean(total_rewards))
-    
-    data = NoisePerformanceData(noise_levels = noise_levels, returns_mean = mean_rewards)
+
+    data = NoisePerformanceData(noise_levels=noise_levels, returns_mean=mean_rewards)
 
     return fit_sigmoid_noise_performance(data, normalize_y=True, prefer_scipy=True)
+
 
 def fit_sigmoid_noise_performance(
     data: NoisePerformanceData,
@@ -126,7 +129,9 @@ def fit_sigmoid_noise_performance(
     ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
     r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
 
-    params = SigmoidParams(x0=float(p_opt[0]), y0=float(p_opt[1]), c=float(p_opt[2]), k=float(p_opt[3]))
+    params = SigmoidParams(
+        x0=float(p_opt[0]), y0=float(p_opt[1]), c=float(p_opt[2]), k=float(p_opt[3])
+    )
     diag = CurveFitDiagnostics(
         r2=float(r2),
         residuals=resid,
@@ -134,4 +139,3 @@ def fit_sigmoid_noise_performance(
         y_pred=y_pred,
     )
     return params, diag
-
