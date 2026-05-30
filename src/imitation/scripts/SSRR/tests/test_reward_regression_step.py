@@ -35,6 +35,212 @@ from imitation.scripts.NTRIL.double_integrator.double_integrator import (
 )
 
 
+def _safe_corrcoef(x: np.ndarray, y: np.ndarray) -> float:
+    """Return Pearson correlation, guarding against near-constant vectors."""
+    if np.std(x) < 1e-12 or np.std(y) < 1e-12:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _compute_airl_snippet_target(
+    airl_reward_net: BasicRewardNet,
+    obs_snip: np.ndarray,
+    acts_snip: np.ndarray,
+) -> float:
+    """Compute AIRL cumulative return for one snippet."""
+    cur_obs = obs_snip[:-1]
+    next_obs = obs_snip[1:]
+    done = np.zeros(len(acts_snip), dtype=np.float32)
+    done[-1] = 1.0
+    per_step = airl_reward_net.predict_processed(
+        cur_obs,
+        acts_snip,
+        next_obs,
+        done,
+        update_stats=False,
+    )
+    return float(np.sum(per_step))
+
+
+def _evaluate_regression_model(
+    reward_model: BasicRewardNet,
+    buckets,
+    sigmoid_params: SigmoidParams,
+    reg_cfg: SSRRRegressionConfig,
+    *,
+    eval_num_snippets: int,
+    eval_seed: int,
+    use_airl_targets: bool,
+    airl_reward_net: BasicRewardNet,
+) -> dict:
+    """Evaluate correlation structure of learned snippet returns."""
+    ds = SnippetDataset(
+        buckets,
+        sigmoid_params,
+        num_snippets=eval_num_snippets,
+        cfg=reg_cfg,
+        rng=np.random.default_rng(eval_seed),
+    )
+
+    pred_returns = []
+    target_returns = []
+    snippet_lengths = []
+
+    reward_model.eval()
+    for i in range(eval_num_snippets):
+        obs_snip, acts_snip, target = ds[i]
+        model_device = reward_model.device
+        cur_obs = th.from_numpy(obs_snip[:-1]).to(model_device).float()
+        next_obs = th.from_numpy(obs_snip[1:]).to(model_device).float()
+        acts_th = th.from_numpy(acts_snip).to(model_device).float()
+        done_th = th.zeros((acts_th.shape[0],), dtype=th.float32, device=model_device)
+        done_th[-1] = 1.0
+        with th.no_grad():
+            pred = float(reward_model(cur_obs, acts_th, next_obs, done_th).sum())
+        pred_returns.append(pred)
+        snippet_lengths.append(int(len(acts_snip)))
+        if use_airl_targets:
+            assert airl_reward_net is not None
+            target_returns.append(
+                _compute_airl_snippet_target(airl_reward_net, obs_snip, acts_snip)
+            )
+        else:
+            target_returns.append(float(target))
+
+    pred_returns_arr = np.asarray(pred_returns, dtype=np.float64)
+    target_returns_arr = np.asarray(target_returns, dtype=np.float64)
+    snippet_lengths_arr = np.asarray(snippet_lengths, dtype=np.float64)
+
+    return {
+        "mse": float(np.mean((pred_returns_arr - target_returns_arr) ** 2)),
+        "pred_target_corr": _safe_corrcoef(pred_returns_arr, target_returns_arr),
+        "pred_length_corr": _safe_corrcoef(pred_returns_arr, snippet_lengths_arr),
+        "target_length_corr": _safe_corrcoef(target_returns_arr, snippet_lengths_arr),
+        "pred_mean": float(np.mean(pred_returns_arr)),
+        "pred_std": float(np.std(pred_returns_arr)),
+        "target_mean": float(np.mean(target_returns_arr)),
+        "target_std": float(np.std(target_returns_arr)),
+    }
+
+
+def run_regression_ablations(
+    *,
+    buckets,
+    sigmoid_params: SigmoidParams,
+    observation_space: gym.Space,
+    action_space: gym.Space,
+    device: str,
+    airl_reward_net: BasicRewardNet,
+) -> None:
+    """Run short ablations to diagnose collapse to length-only signal."""
+    ablations = [
+        {
+            "name": "baseline_len_norm_wd",
+            "cfg": SSRRRegressionConfig(
+                min_steps=50,
+                max_steps=500,
+                target_scale=10.0,
+                length_normalize=True,
+            ),
+            "weight_decay": 0.01,
+            "use_airl_targets": False,
+        },
+        {
+            "name": "fixed_len_wd",
+            "cfg": SSRRRegressionConfig(
+                min_steps=200,
+                max_steps=200,
+                target_scale=10.0,
+                length_normalize=True,
+            ),
+            "weight_decay": 0.01,
+            "use_airl_targets": False,
+        },
+        {
+            "name": "baseline_no_wd",
+            "cfg": SSRRRegressionConfig(
+                min_steps=50,
+                max_steps=500,
+                target_scale=10.0,
+                length_normalize=True,
+            ),
+            "weight_decay": 0.0,
+            "use_airl_targets": False,
+        },
+        {
+            "name": "baseline_airl_targets_no_wd",
+            "cfg": SSRRRegressionConfig(
+                min_steps=50,
+                max_steps=500,
+                target_scale=10.0,
+                length_normalize=True,
+            ),
+            "weight_decay": 0.0,
+            "use_airl_targets": True,
+        },
+    ]
+
+    n_steps = 800
+    num_snippets = 5000
+    batch_size = 64
+    lr = 1e-4
+
+    print("\n=== SSRR regression ablations (diagnostic) ===")
+    for idx, setting in enumerate(ablations):
+        use_airl_targets = bool(setting["use_airl_targets"])
+        if use_airl_targets and airl_reward_net is None:
+            print(
+                f"[{setting['name']}] skipped: requires AIRL reward net targets but none provided."
+            )
+            continue
+
+        cfg = setting["cfg"]
+        dataloader = make_dataloader(
+            buckets=buckets,
+            sigmoid=sigmoid_params,
+            num_snippets=num_snippets,
+            cfg=cfg,
+            batch_size=batch_size,
+            rng=np.random.default_rng(101 + idx),
+        )
+        reward_network = BasicRewardNet(
+            observation_space=observation_space,
+            action_space=action_space,
+            normalize_input_layer=RunningNorm,
+        )
+        regressor = SSRRRegressor(
+            reward_net=reward_network,
+            lr=lr,
+            weight_decay=float(setting["weight_decay"]),
+            device=device,
+        )
+        step_losses = regressor.train(dataloader, n_steps=n_steps, log_interval=200)[
+            "step_losses"
+        ]
+        eval_stats = _evaluate_regression_model(
+            reward_model=regressor.reward_net,
+            buckets=buckets,
+            sigmoid_params=sigmoid_params,
+            reg_cfg=cfg,
+            eval_num_snippets=1500,
+            eval_seed=303 + idx,
+            use_airl_targets=use_airl_targets,
+            airl_reward_net=airl_reward_net,
+        )
+        print(
+            (
+                f"[{setting['name']}] "
+                f"final_loss={step_losses[-1]:.4f} min_loss={min(step_losses):.4f} "
+                f"mse={eval_stats['mse']:.4f} "
+                f"corr(pred,target)={eval_stats['pred_target_corr']:.3f} "
+                f"corr(pred,length)={eval_stats['pred_length_corr']:.3f} "
+                f"corr(target,length)={eval_stats['target_length_corr']:.3f} "
+                f"pred_std={eval_stats['pred_std']:.4f} "
+                f"target_std={eval_stats['target_std']:.4f}"
+            )
+        )
+
+
 def test_reward_regression_loss_decreases_simple():
     # Create a tiny reward net and a synthetic batch of snippets where the
     # correct return is 0.0 (all-zero observations/actions).
@@ -82,7 +288,7 @@ if __name__ == "__main__":
     # args = parser.parse_args()
     # force_retrain = args.force_retrain.split(",")
     use_airl = True
-    force_retrain = []
+    force_retrain = ["reward_regression", "rl_training"]
 
     # Set random generator
     rngs = np.random.default_rng(42)
@@ -116,7 +322,7 @@ if __name__ == "__main__":
     # Load AIRL or basic suboptimal policy trained on double integrator and associated reward network
     if use_airl: #args.use_airl:
 
-        AIRL_RUN = "20260420_231943_sinusoidal_A1.0_f0.01"
+        AIRL_RUN = "20260527_231943_sinusoidal_A1.0_f0.01"
         airl_run_dir = SCRIPT_DIR / "airl_outputs" / AIRL_RUN
 
         RUN = AIRL_RUN
@@ -272,13 +478,13 @@ if __name__ == "__main__":
     # Regression hyperparameters aligned with NTRILTrainer._train_reward_network defaults.
     reg_batch_size = 64
     reg_lr = 1e-4
-    reg_weight_decay = 0.01
+    reg_weight_decay = 0.001
     reg_n_steps = 3_000
     reg_num_snippets = 5000
 
     # SSRRRegressionConfig controls snippet sampling and target scaling.
-    reg_min_steps = 50
-    reg_max_steps = 500
+    reg_min_steps = 1000
+    reg_max_steps = 1000
     reg_target_scale = 10.0
     reg_length_normalize = True
     reg_cfg = SSRRRegressionConfig(
@@ -290,6 +496,17 @@ if __name__ == "__main__":
 
     # Reward network initialization
     reward_net_init = {"custom_init": True}
+
+    run_regression_diagnostics = False
+    if run_regression_diagnostics:
+        run_regression_ablations(
+            buckets=noisy_trajectories,
+            sigmoid_params=sigmoid_params,
+            observation_space=venv.observation_space,
+            action_space=venv.action_space,
+            device=device,
+            airl_reward_net=reward_net if use_airl else None,
+        )
 
     force_reward_regression_train = "reward_regression" in force_retrain
     reward_nets_ensemble = []

@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
     if use_airl:
 
-        AIRL_RUN = "20260420_231943_sinusoidal_A1.0_f0.01"
+        AIRL_RUN = "20260527_231943_sinusoidal_A1.0_f0.01"
         airl_run_dir = SCRIPT_DIR / "airl_outputs" / AIRL_RUN
 
         airl_gen = PPO.load(airl_run_dir / "best_checkpoint" / "learner_policy")
@@ -235,7 +235,7 @@ if __name__ == "__main__":
         sigmoid_fit_dir.mkdir(parents=True, exist_ok=True)
 
         # Check if noisy trajectories are already generated in that trained AIRL policy
-        force_generate_noisy_trajectories = True
+        force_generate_noisy_trajectories = False
         noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
         if (
             os.path.exists(noisy_trajectories_path)
@@ -352,7 +352,7 @@ if __name__ == "__main__":
     plt.plot(independent_noise_levels, predicted_returns, "b-", label="Fitted Returns")
     plt.xlabel("Noise Level")
     plt.ylabel("Normalized Return")
-    plt.ylim([0, 1])
+    # plt.ylim([0, 1])
     plt.legend()
 
     plt.savefig(sigmoid_fit_dir / "sigmoid_fit.png")

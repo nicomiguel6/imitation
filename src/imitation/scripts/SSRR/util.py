@@ -436,8 +436,13 @@ def load_ssrr_ensemble(
         List of loaded ``BasicRewardNet`` instances in eval mode.
     """
     nets: List[BasicRewardNet] = []
-    for i in range(n_ensemble):
-        path = ensemble_dir / f"ssrr_reward_{i}.pt"
+    if n_ensemble == 1:
+        # Load the only possible file from the directory, whatever its name is
+        files = list(ensemble_dir.glob("*.pt"))
+        if len(files) != 1:
+            raise FileNotFoundError(f"Expected exactly 1 .pt file in {ensemble_dir}, found {len(files)}")
+        path = files[0]
+ 
         net = BasicRewardNet(
             observation_space=observation_space,
             action_space=action_space,
@@ -447,4 +452,46 @@ def load_ssrr_ensemble(
         net.to(device)
         net.eval()
         nets.append(net)
+    else:
+        for i in range(n_ensemble):
+            path = ensemble_dir / f"ssrr_reward_{i}.pt"
+            net = BasicRewardNet(
+                observation_space=observation_space,
+                action_space=action_space,
+                normalize_input_layer=RunningNorm,
+            )
+            net.load_state_dict(th.load(str(path), map_location=device))
+            net.to(device)
+            net.eval()
+            nets.append(net)
     return nets
+
+if __name__ == "__main__":
+    # Set up dummy env
+    env = gym.make("imitation.scripts.NTRIL.double_integrator:DoubleIntegrator-v0")
+    observation_space = env.observation_space
+    action_space = env.action_space
+    device = "cuda" if th.cuda.is_available() else "cpu"
+    
+    reference_trajectory = np.load("/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/reference_trajectory.npy")
+    
+    # load ensemble of reward net
+    ensemble = load_ssrr_ensemble(
+        ensemble_dir=Path("/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/best_airl"),
+        observation_space=observation_space,
+        action_space=action_space,
+        n_ensemble=1,
+        device=device,
+    )
+
+    # plot reward time slider
+    fig, ax, slider = plot_learned_reward_time_slider(
+        ensemble=ensemble,
+        observation_space=observation_space,
+        action_space=action_space,
+        reference_trajectory=reference_trajectory,
+        n_grid=100,
+        max_frames=250,
+        device=device,
+    )
+    plt.show()

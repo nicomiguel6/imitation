@@ -135,11 +135,11 @@ def build_models(
         }
 
     if "airl" in active_models:
-        airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260501_224503_constant_P0.0/initial_BC_policy/bc_policy.zip"  # for debugging initial BC policy
+        # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260501_224503_constant_P0.0/initial_BC_policy/bc_policy.zip"  # for debugging initial BC policy
         # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260501_221911_constant_P0.0/best_checkpoint/learner_policy.zip"
         # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/final_policy/learner_policy.zip"
-        # airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_224617_sinusoidal_A1.0_f0.01/best_checkpoint/learner_policy.zip"
-        policy = PPO.load(airl_path, device="cpu")
+        airl_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/best_airl/learner_policy.zip"
+        policy = PPO.load(airl_path, device="cuda")
         models["airl"] = {
             "env": gym.make(env_id, **env_kwargs),
             "predict": lambda obs, p=policy: p.predict(obs)[0],
@@ -147,7 +147,7 @@ def build_models(
         }
 
     if "ssrr" in active_models:
-        ssrr_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/ssrr_rl/20260501_221114/ssrr_rl_policy.zip"
+        ssrr_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260527_231943_sinusoidal_A1.0_f0.01/ssrr_rl/20260527_225416/ssrr_rl_policy.zip"
         policy = SAC.load(ssrr_path, device="cuda")
         models["ssrr"] = {
             "env": gym.make(env_id, **env_kwargs),
