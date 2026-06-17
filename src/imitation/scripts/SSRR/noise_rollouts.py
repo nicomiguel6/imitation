@@ -20,15 +20,19 @@ def generate_noisy_rollout_buckets(
     n_rollouts_per_noise: int,
     rng: np.random.Generator,
     reference_trajectory: Optional[np.ndarray] = None,
+    noise_action_scale: float = 1.0,
 ) -> Sequence[NoiseBucket]:
     """Collect noisy rollouts and group them by noise level.
 
     Notes:
     - We set `exclude_infos=False` so each trajectory retains `infos[0]["noise_level"]`,
       matching how NTRIL/D-REX code expects noise metadata to be stored.
+    - `noise_action_scale` (default 1.0) controls the magnitude of the random
+      epsilon-greedy replacement action; values < 1.0 yield graded degradation
+      instead of immediate saturation (see EpsilonGreedyNoiseInjector).
     """
     buckets: List[NoiseBucket] = []
-    noise_injector = EpsilonGreedyNoiseInjector()
+    noise_injector = EpsilonGreedyNoiseInjector(noise_action_scale=noise_action_scale)
     for eta in tqdm.tqdm(noise_levels):
         noisy_policy = noise_injector.inject_noise(base_policy, noise_level=float(eta))
         rollouts = rollout.rollout(

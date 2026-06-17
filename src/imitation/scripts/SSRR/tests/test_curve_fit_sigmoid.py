@@ -235,7 +235,7 @@ if __name__ == "__main__":
         sigmoid_fit_dir.mkdir(parents=True, exist_ok=True)
 
         # Check if noisy trajectories are already generated in that trained AIRL policy
-        force_generate_noisy_trajectories = False
+        force_generate_noisy_trajectories = True
         noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
         if (
             os.path.exists(noisy_trajectories_path)
@@ -334,12 +334,7 @@ if __name__ == "__main__":
     independent_noise_levels = np.linspace(0, 1.1, 1500)
     predicted_returns = _sigmoid(sigmoid_params, independent_noise_levels)
 
-    total_noise_levels = []
-
-    for bucket in noisy_trajectories:
-        for traj in bucket.trajectories:
-            total_noise_levels.append(traj.infos[0]["noise_level"])
-
+    total_noise_levels = noise_performance_data.noise_levels_all
     returns_all = noise_performance_data.returns_all
 
     # Normalize returns_all to be between 0 and 1

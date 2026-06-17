@@ -38,7 +38,8 @@ def estimate_suboptimal_returns_by_noise(
     noise_levels = []
     means = []
     stds = []
-    returns_all = []
+    returns_all_flat: list[float] = []
+    noise_levels_all_flat: list[float] = []
 
     for bucket in buckets:
         returns = []
@@ -53,17 +54,19 @@ def estimate_suboptimal_returns_by_noise(
                 cur_obs, acts, next_obs, done, update_stats=False
             )
             returns.append(float(np.sum(r)))
-        returns_all.append(returns)
         returns_arr = np.asarray(returns, dtype=np.float64)
         noise_levels.append(bucket.noise_level)
         means.append(float(np.mean(returns_arr)) if len(returns_arr) else 0.0)
         stds.append(float(np.std(returns_arr)) if len(returns_arr) else 0.0)
+        returns_all_flat.extend(returns)
+        noise_levels_all_flat.extend([bucket.noise_level] * len(returns))
 
     return NoisePerformanceData(
         noise_levels=np.asarray(noise_levels, dtype=np.float64),
         returns_mean=np.asarray(means, dtype=np.float64),
         returns_std=np.asarray(stds, dtype=np.float64),
-        returns_all=np.reshape(np.asarray(returns_all, dtype=np.float64), (-1,)),
+        returns_all=np.asarray(returns_all_flat, dtype=np.float64),
+        noise_levels_all=np.asarray(noise_levels_all_flat, dtype=np.float64),
     )
 
 

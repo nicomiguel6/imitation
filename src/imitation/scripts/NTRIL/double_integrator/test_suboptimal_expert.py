@@ -77,7 +77,7 @@ def build_models(
         policy = PPO.load(ntril_path, device="cuda")
         models["ntril"] = {
             "env": gym.make(env_id, **env_kwargs),
-            "predict": lambda obs, p=policy: p.predict(obs)[0],
+            "predict": lambda obs, p=policy: p.predict(obs, deterministic=True)[0],
             "reset": None,
         }
 
@@ -86,7 +86,7 @@ def build_models(
         policy = PPO.load(drex_path, device="cuda")
         models["drex"] = {
             "env": gym.make(env_id, **env_kwargs),
-            "predict": lambda obs, p=policy: p.predict(obs)[0],
+            "predict": lambda obs, p=policy: p.predict(obs, deterministic=True)[0],
             "reset": None,
         }
 
@@ -142,16 +142,16 @@ def build_models(
         policy = PPO.load(airl_path, device="cuda")
         models["airl"] = {
             "env": gym.make(env_id, **env_kwargs),
-            "predict": lambda obs, p=policy: p.predict(obs)[0],
+            "predict": lambda obs, p=policy: p.predict(obs, deterministic=True)[0],
             "reset": None,
         }
 
     if "ssrr" in active_models:
-        ssrr_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260527_231943_sinusoidal_A1.0_f0.01/ssrr_rl/20260527_225416/ssrr_rl_policy.zip"
+        ssrr_path = "/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260527_231943_sinusoidal_A1.0_f0.01/ssrr_rl/20260616_202407/ssrr_rl_policy.zip"
         policy = SAC.load(ssrr_path, device="cuda")
         models["ssrr"] = {
             "env": gym.make(env_id, **env_kwargs),
-            "predict": lambda obs, p=policy: p.predict(obs)[0],
+            "predict": lambda obs, p=policy: p.predict(obs, deterministic=True)[0],
             "reset": None,
         }
     return models

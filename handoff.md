@@ -1,116 +1,121 @@
-# SSRR Regression Debug Handoff
+# SSRR Reward Regression — Troubleshooting Handoff
 
-## Session Goal
+## Goal
 
-Diagnose why SSRR reward regression in `src/imitation/scripts/SSRR/tests/test_reward_regression_step.py` appears to "diverge" and produces a near-constant reward over state space.
+Get the SSRR learned reward (Phase 3 regression) to produce a well-shaped reward
+surface near the reference trajectory, so the downstream RL agent actually
+improves over the suboptimal expert. The pipeline lives in:
 
-## What Was Investigated
+- `src/imitation/scripts/SSRR/reward_regression.py` — snippet dataset + `SSRRRegressor`
+- `src/imitation/scripts/SSRR/curve_fit.py` — noise→return sigmoid fit (Phase 2)
+- `src/imitation/scripts/SSRR/noise_rollouts.py` — noisy rollout generation (Phase 1)
+- `src/imitation/scripts/SSRR/tests/test_reward_regression_step.py` — end-to-end driver
+- `src/imitation/scripts/SSRR/util.py` — `plot_learned_reward_time_slider`
+- `src/imitation/scripts/NTRIL/double_integrator/test_suboptimal_expert.py` — eval/compare
 
-- Verified end-to-end regression logic in:
-  - `src/imitation/scripts/SSRR/reward_regression.py`
-  - `src/imitation/scripts/SSRR/tests/test_reward_regression_step.py`
-  - `src/imitation/scripts/SSRR/curve_fit.py`
-  - `src/imitation/scripts/SSRR/noise_rollouts.py`
-- Checked whether training behavior matches intended SSRR objective:
-  - batch of snippets
-  - snippet cumulative reward prediction
-  - MSE to sigmoid-derived target
-- Computed dataset/target statistics from current AIRL run artifacts under:
-  - `src/imitation/scripts/SSRR/tests/airl_outputs/20260527_231943_sinusoidal_A1.0_f0.01`
+## Pipeline Recap (what trains on what)
 
-## Key Findings
+1. **Phase 1 (noise rollouts):** `generate_noisy_rollout_buckets` rolls out the base
+   policy at each noise level η. Noise metadata is stored *per-step* in
+   `traj.infos[i]["noise_level"]` (and `noise_applied`, `total_applied_noise_sum`),
+   not as a top-level trajectory attribute. Buckets pair η ↔ trajectories.
+2. **Phase 2 (sigmoid fit):** `estimate_suboptimal_returns_by_noise` evaluates the
+   reward net on each trajectory → `(η, mean_return)` points; `fit_sigmoid_noise_performance`
+   fits the 4-param decreasing sigmoid σ(η).
+3. **Phase 3 (regression):** `SnippetDataset` samples snippets, converts η→target via
+   σ(η) (scaled by L/T when `length_normalize=True`), and `SSRRRegressor` trains
+   R_θ(s,a) so the summed snippet reward matches that target (MSE).
+4. **RL:** SAC trains on the ensemble-mean learned reward.
 
-1. **Training implementation matches intended loop**  
-   The code does pass batches of variable-length snippets, computes cumulative predicted reward per snippet, compares to target return, and backprops via MSE.
+Key point: the network never sees η as an input — η only enters through the
+**target label**. This is correct by design (η is unavailable at RL inference time).
 
-2. **Observed behavior is not exploding divergence**  
-   Loss is noisy but does not blow up numerically. It improves early, then plateaus.
+## Changes Made This Session
 
-3. **Primary failure mode = length shortcut / degenerate solution**  
-   Learned predictions are almost perfectly explained by snippet length (constant per-step reward), not meaningful state discrimination.
+1. **`curve_fit.py` / `types.py` — fixed flattened `returns_all`.**
+   `NoisePerformanceData` gained `noise_levels_all` (paired 1:1 with flat `returns_all`).
+   `estimate_suboptimal_returns_by_noise` now builds both in the same loop, so the
+   scatter plot no longer relies on the caller re-iterating buckets in matching order.
+   (`test_curve_fit_sigmoid.py` updated to use `noise_performance_data.noise_levels_all`.)
 
-4. **Removing weight decay alone is insufficient**  
-   Degenerate behavior remains with `weight_decay=0`.
+2. **`test_reward_regression_step.py` — fixed kwarg bug.**
+   Two calls used `suboptimal_reward=reward_net`, but the function param is `reward`.
+   Would `TypeError` only in the branch where `sigmoid_params.npy` is absent. Fixed both.
 
-5. **AIRL-target comparison shows severe scale/sign mismatch**  
-   AIRL snippet returns are on very different scale from sigmoid target regime, so direct comparison is dominated by mismatch.
+3. **`reward_regression.py` — batched forward pass.**
+   `_collate_snippets` now flattens all snippet timesteps into single tensors;
+   `SSRRRegressor.train` does ONE `reward_net(...)` call per batch, then `th.split` +
+   sum per snippet (was a Python loop = one forward pass per snippet). Big speedup.
 
-## Code Changes Made
+4. **`reward_regression.py` — dropped `next_obs`/`done` inputs.**
+   Network input is now just `[obs; act]` (matches the original SSRR TF code).
+   `BasicRewardNet` already defaults `use_next_state=False, use_done=False`.
 
-Added regression ablation diagnostics directly in:
+5. **`util.py` — `plot_learned_reward_time_slider` zooms to reference range.**
+   Was sweeping the full obs-space bounds (±100 pos / ±10 vel), so it plotted mostly
+   extrapolation. Now zooms to reference trajectory range + `plot_margin` (default 0.5),
+   clipped to obs bounds. **Plot-only fix; does not affect training.**
 
-- `src/imitation/scripts/SSRR/tests/test_reward_regression_step.py`
+6. **`test_suboptimal_expert.py` — deterministic eval.**
+   All learned-policy `predict()` calls (`ntril`, `drex`, `airl`, `ssrr`) now pass
+   `deterministic=True`. This matters most for SSRR/SAC: stochastic sampling was
+   injecting action noise every step and making the agent look like it never improved.
 
-New helpers/functions:
+## Diagnosed Root Causes (reward regression quality)
 
-- `_safe_corrcoef(...)`
-- `_compute_airl_snippet_target(...)`
-- `_evaluate_regression_model(...)`
-- `run_regression_ablations(...)`
+- **State bounds leak into training data (real issue).**
+  `DoubleIntegrator.step` *clamps* state to `±max_position` / `±max_velocity`
+  (lines ~438–452 in `double_integrator.py`). With loose defaults (e.g. 100/10),
+  high-noise rollouts drift far before clamping, so `RunningNorm` and the network
+  are trained over a huge range while the reference lives in ≈[-1, 1]. Tighten bounds
+  (e.g. `max_position≈3`, `max_velocity≈1` for A=1.0 sinusoid) to concentrate training
+  data near the reference. NOTE: this changes the *data*, unlike the plot zoom in (5).
 
-Main script now runs ablations before ensemble training via:
+- **Snippet length / `target_scale` (objective structure).**
+  Current driver uses `reg_min_steps = reg_max_steps = 1000` with `T = 1000`, so every
+  snippet is the whole episode and `length_normalize` is a no-op — only 105 distinct
+  training points (5 trajs × 21 noise levels). `target_scale` then acts as a pure global
+  multiplier (why `1.0` is better-conditioned than `10.0` given small-init weights).
+  - Short snippets (paper default) give far more diverse examples BUT the sinusoidal
+    tracking reward is highly time-varying, so very short windows (10–50) bury the
+    noise signal under positional variation.
+  - Suggested middle ground: `reg_min_steps≈100, reg_max_steps≈200`, `target_scale≈5`,
+    `reg_num_snippets≈20000`. Windows of ~150 cover >1 sinusoid period (period =
+    1/f = 100 steps), averaging out reference variation while still giving ~90k distinct
+    windows instead of 105.
 
-- `run_regression_diagnostics = True`
+- **Prior session finding (still relevant): length shortcut / degenerate solution.**
+  With `length_normalize` + variable length, the model could explain predictions almost
+  entirely by snippet length (`corr(pred,length)=1.0`), i.e. a constant per-step reward,
+  rather than discriminating states. Mitigations discussed: fixed-length snippets,
+  regress *mean* per-step return, add a ranking/pairwise term between same-length
+  snippets across noise levels, and align scales before mixing AIRL vs sigmoid targets.
 
-## Diagnostic Ablations Added
+## Caching Gotchas (cause stale results)
 
-Each setting trains for 800 steps and reports:
+- **Reward ensemble:** retrained only if `"reward_regression" in force_retrain` OR the
+  `ensemble/ssrr_reward_*.pt` files are missing. After changing snippet/bounds/scale
+  config, you MUST force retrain or you'll silently reuse old reward nets.
+- **RL policy:** retrained only if `"rl_training" in force_retrain` OR
+  `ssrr_rl/ssrr_rl_policy.zip` is missing. Same caveat.
+- **Sigmoid params:** loaded from `sigmoid_fit/sigmoid_params.npy` if present.
+- The latest policy is written to both `ssrr_rl/<timestamp>/ssrr_rl_policy.zip` and the
+  top-level `ssrr_rl/ssrr_rl_policy.zip`. `test_suboptimal_expert.py` currently hardcodes
+  a specific timestamped path — update it after each retrain (or point it at the
+  top-level "latest").
 
-- `final_loss`, `min_loss`
-- `mse`
-- `corr(pred,target)`
-- `corr(pred,length)`
-- `corr(target,length)`
-- `pred_std`, `target_std`
+## Suggested Next Steps
 
-Settings:
-
-- `baseline_len_norm_wd`
-- `fixed_len_wd`
-- `baseline_no_wd`
-- `baseline_airl_targets_no_wd`
-
-## Reported Results (from terminal output)
-
-- `baseline_len_norm_wd`: `corr(pred,length)=1.000`, `corr(pred,target)=0.547`
-- `fixed_len_wd`: `pred_std=0.0009`, `corr(pred,target)=0.050` (length fixed, model nearly constant)
-- `baseline_no_wd`: still `corr(pred,length)=1.000`
-- `baseline_airl_targets_no_wd`: huge MSE, very large target std, negative correlation (scale/sign mismatch diagnostic)
-
-## Interpretation
-
-- The model is converging to a **length-driven constant-per-step reward** solution.
-- This explains flat/blanket learned reward surfaces.
-- Issue is **identifiability/objective structure**, not primarily vanishing gradients.
-
-## Conceptual Direction Agreed
-
-To avoid collapse, enforce signal that cannot be solved by length alone:
-
-1. Remove length shortcut:
-   - fixed snippet length, or
-   - regress per-step mean reward rather than sum.
-2. Add relative constraints:
-   - ranking/pairwise loss between same-length snippets across noise levels.
-3. Increase state-space diversity in rollouts.
-4. Consider anti-collapse regularization and/or teacher-anchored local targets.
-5. Align target scales before mixing AIRL-based and sigmoid-based objectives.
-
-## Suggested Next Implementation Steps
-
-1. Add CLI flags in `test_reward_regression_step.py`:
-   - `--run_regression_diagnostics`
-   - `--ablation_steps`
-   - `--skip_rl`
-2. Implement an alternative training mode:
-   - fixed-length snippets only
-   - loss on mean per-step return
-3. Add ranking term for same-length snippet pairs:
-   - enforce lower-noise snippet return > higher-noise snippet return by margin/logistic.
-4. Add quick metrics after each run:
-   - `corr(pred,length)`, `corr(pred,target)`, `pred_std`
-   - fail-fast warning when collapse detected.
+1. Re-run `test_suboptimal_expert.py` with the deterministic-eval fix to get a clean
+   read on whether the *current* SAC policy is actually bad.
+2. Tighten `max_position` / `max_velocity` in the env, force-retrain reward + RL, and
+   re-check the (now zoomed) reward contour.
+3. Sweep snippet length (≈100–200) and `target_scale`; watch `corr(pred,length)` vs
+   `corr(pred,target)` to detect the length-shortcut collapse.
+4. If SAC still underperforms on a good reward, add a PPO training path to A/B
+   (deferred this session — was option (b), not yet done).
 
 ## Repo State Notes
 
-There were pre-existing unrelated working tree changes and generated artifacts before this session (including SSRR AIRL output files and other modified scripts). This session intentionally did not revert them.
+Pre-existing unrelated working-tree changes and generated artifacts were present before
+this session and were intentionally left as-is. No commits were made.

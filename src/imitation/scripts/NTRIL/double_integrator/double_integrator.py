@@ -207,8 +207,8 @@ class DoubleIntegratorEnv(gym.Env):
     def __init__(
         self,
         dt: float = 1.0,
-        max_position: float = 100.0,
-        max_velocity: float = 10.0,
+        max_position: float = 10.0,
+        max_velocity: float = 5.0,
         max_acceleration: float = 5.0,
         target_position: float = 0.0,
         position_tolerance: float = 0.1,

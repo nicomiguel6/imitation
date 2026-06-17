@@ -28,7 +28,7 @@ from imitation.util.networks import RunningNorm
 from imitation.scripts.SSRR.types import SigmoidParams, SSRRRegressionConfig
 from imitation.rewards.reward_wrapper import RewardVecEnvWrapper
 from imitation.scripts.SSRR.reporting import write_rl_run_report
-from imitation.scripts.SSRR.util import plot_learned_reward, plot_learned_reward_time, plot_learned_reward_time_slider
+from imitation.scripts.SSRR.util import plot_learned_reward, plot_learned_reward_time, plot_learned_reward_time_slider, reward_sanity_gate
 from imitation.scripts.NTRIL.double_integrator.double_integrator import (
     DoubleIntegratorSuboptimalPolicy,
     DoubleIntegratorTrackingReward,
@@ -290,6 +290,29 @@ if __name__ == "__main__":
     use_airl = True
     force_retrain = ["reward_regression", "rl_training"]
 
+    # ------------------------------------------------------------------
+    # Noise-process config (reversible).
+    #   noise_action_scale = 1.0  -> ORIGINAL SSRR/D-REX behavior (full-range
+    #       uniform random epsilon-greedy action). For the double integrator this
+    #       saturates the state to its clamp bounds for any eta >~ 0.05, so all
+    #       noisy buckets collapse to the same boundary states and the regressor
+    #       cannot learn a state-discriminative reward.
+    #   noise_action_scale < 1.0  -> shrink the random action toward the action
+    #       midpoint so degradation is *graded* (recoverable by the base policy),
+    #       giving a smooth spectrum of visited states across eta.
+    # Artifacts (rollouts / sigmoid / ensemble) are cached under a scale-specific
+    # tag, so setting this back to 1.0 returns you to the original files/results.
+    # ------------------------------------------------------------------
+    noise_action_scale = 0.1
+    noise_levels = tuple(np.arange(0.0, 1.05, 0.05))
+
+    def _noise_tag(scale: float) -> str:
+        if abs(scale - 1.0) < 1e-9:
+            return ""  # original artifacts/paths
+        return f"_scale{scale:g}".replace(".", "p")
+
+    noise_tag = _noise_tag(noise_action_scale)
+
     # Set random generator
     rngs = np.random.default_rng(42)
 
@@ -354,7 +377,8 @@ if __name__ == "__main__":
 
         # Check if noisy trajectories are already generated in that trained AIRL policy
         force_generate_noisy_trajectories = False
-        noisy_trajectories_path = noisy_rollouts_dir / "noisy_trajectories.pkl"
+        noisy_rollouts_dir.mkdir(parents=True, exist_ok=True)
+        noisy_trajectories_path = noisy_rollouts_dir / f"noisy_trajectories{noise_tag}.pkl"
         if (
             os.path.exists(noisy_trajectories_path)
             and not force_generate_noisy_trajectories
@@ -364,22 +388,23 @@ if __name__ == "__main__":
             # Generate noisy trajectories
             noisy_trajectories = generate_noisy_rollout_buckets(
                 base_policy=airl_policy,
-                noise_levels=tuple(np.arange(0.0, 1.05, 0.05)),
+                noise_levels=noise_levels,
                 n_rollouts_per_noise=5,
                 rng=rngs,
                 venv=venv,
                 reference_trajectory=reference_trajectory,
+                noise_action_scale=noise_action_scale,
             )
             pickle.dump(noisy_trajectories, open(noisy_trajectories_path, "wb"))
 
         # Load sigmoid params (produced by test_curve_fit_sigmoid.py) if not already loaded
-        sigmoid_params_path = sigmoid_fit_dir / "sigmoid_params.npy"
+        sigmoid_params_path = sigmoid_fit_dir / f"sigmoid_params{noise_tag}.npy"
         if os.path.exists(sigmoid_params_path):
             sigmoid_params = np.load(sigmoid_params_path)
         else:
             # Fit sigmoid
             noise_performance_data = estimate_suboptimal_returns_by_noise(
-                buckets=noisy_trajectories, suboptimal_reward=reward_net
+                buckets=noisy_trajectories, reward=reward_net
             )
             sigmoid_params, diag = fit_sigmoid_noise_performance(
                 noise_performance_data, normalize_y=True, prefer_scipy=True
@@ -389,12 +414,15 @@ if __name__ == "__main__":
                 np.asarray(sigmoid_params.as_tuple(), dtype=np.float64),
             )
 
-        sigmoid_params = SigmoidParams(
-            x0=sigmoid_params[0],
-            y0=sigmoid_params[1],
-            c=sigmoid_params[2],
-            k=sigmoid_params[3],
-        )
+        # `fit_sigmoid_noise_performance` already returns a SigmoidParams; only the
+        # np.load (cached) path yields a raw array that needs wrapping.
+        if not isinstance(sigmoid_params, SigmoidParams):
+            sigmoid_params = SigmoidParams(
+                x0=float(sigmoid_params[0]),
+                y0=float(sigmoid_params[1]),
+                c=float(sigmoid_params[2]),
+                k=float(sigmoid_params[3]),
+            )
 
     else:
 
@@ -449,7 +477,7 @@ if __name__ == "__main__":
         else:
             # Fit sigmoid
             noise_performance_data = estimate_suboptimal_returns_by_noise(
-                buckets=noisy_trajectories, suboptimal_reward=reward_net
+                buckets=noisy_trajectories, reward=reward_net
             )
             sigmoid_params, diag = fit_sigmoid_noise_performance(
                 noise_performance_data, normalize_y=True, prefer_scipy=True
@@ -459,16 +487,17 @@ if __name__ == "__main__":
                 np.asarray(sigmoid_params.as_tuple(), dtype=np.float64),
             )
 
-        sigmoid_params = SigmoidParams(
-            x0=sigmoid_params[0],
-            y0=sigmoid_params[1],
-            c=sigmoid_params[2],
-            k=sigmoid_params[3],
-        )
+        if not isinstance(sigmoid_params, SigmoidParams):
+            sigmoid_params = SigmoidParams(
+                x0=float(sigmoid_params[0]),
+                y0=float(sigmoid_params[1]),
+                c=float(sigmoid_params[2]),
+                k=float(sigmoid_params[3]),
+            )
 
     # Train/load an ensemble of SSRR reward regressors (mirrors NTRILTrainer pattern).
     n_ensemble = 3
-    ensemble_dir = ssrr_regression_dir / "ensemble"
+    ensemble_dir = ssrr_regression_dir / f"ensemble{noise_tag}"
     ensemble_dir.mkdir(parents=True, exist_ok=True)
     ensemble_reward_paths = [
         ensemble_dir / f"ssrr_reward_{i}.pt" for i in range(n_ensemble)
@@ -480,12 +509,12 @@ if __name__ == "__main__":
     reg_lr = 1e-4
     reg_weight_decay = 0.001
     reg_n_steps = 3_000
-    reg_num_snippets = 5000
+    reg_num_snippets = 20_000
 
     # SSRRRegressionConfig controls snippet sampling and target scaling.
-    reg_min_steps = 1000
-    reg_max_steps = 1000
-    reg_target_scale = 10.0
+    reg_min_steps = 100
+    reg_max_steps = 200
+    reg_target_scale = 5.0
     reg_length_normalize = True
     reg_cfg = SSRRRegressionConfig(
         min_steps=reg_min_steps,
@@ -568,15 +597,68 @@ if __name__ == "__main__":
     )
     plt.show()
 
+    # ------------------------------------------------------------------
+    # Sanity gate: verify the learned reward actually favors the reference
+    # BEFORE spending compute on RL. A flat / mis-oriented reward (argmax far
+    # from the reference, near-zero dynamic range) is the failure mode that makes
+    # SAC produce a useless policy, so we catch it here.
+    # ------------------------------------------------------------------
+    block_rl_on_gate_fail = False
+    gate_result = reward_sanity_gate(
+        ensemble=reward_nets_ensemble,
+        observation_space=venv.observation_space,
+        action_space=venv.action_space,
+        reference_trajectory=reference_trajectory,
+        n_grid=80,
+        n_frames=50,
+        device=device,
+        raise_on_fail=False,
+    )
+    if not gate_result["pass"] and block_rl_on_gate_fail:
+        print(
+            "\n[Sanity gate] Skipping RL training because the learned reward does "
+            "not favor the reference. Inspect the reward contour / noise process, "
+            "then re-run. (Set block_rl_on_gate_fail=False to train anyway.)"
+        )
+        import sys
+
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # RL-side reward rescaling (reversible).
+    # The SSRR reward has the right SHAPE but a tiny magnitude (~1e-3), which is
+    # the same order as SAC's entropy bonus -> entropy maximization dominates and
+    # the policy stays near-random. A positive affine transform r' = a*(r - b)
+    # leaves the optimal policy unchanged, so we bring the per-step reward to ~unit
+    # scale (and optionally zero-center it) purely for the RL stage.
+    #   reward_output_scale = 1.0 and reward_output_center = False  -> original behavior.
+    #   reward_output_scale = "auto"  -> a = reward_target_std / grid_std (from gate).
+    # ------------------------------------------------------------------
+    reward_output_scale = "auto"   # float multiplier, or "auto"
+    reward_output_center = True    # subtract the reward's grid mean
+    reward_target_std = 50.0        # used only when reward_output_scale == "auto"
+
+    if reward_output_scale == "auto":
+        _reward_scale = reward_target_std / max(gate_result["reward_grid_std"], 1e-8)
+    else:
+        _reward_scale = float(reward_output_scale)
+    _reward_bias = gate_result["reward_grid_mean"] if reward_output_center else 0.0
+    print(
+        f"[Reward rescale] scale={_reward_scale:.4g} bias={_reward_bias:.4g} "
+        f"(grid_mean={gate_result['reward_grid_mean']:.4g}, "
+        f"grid_std={gate_result['reward_grid_std']:.4g})"
+    )
+
     # Train RL policy on SSRR reward
     def ensemble_reward_fn(obs, acts, next_obs, dones):
-        return np.mean(
+        r = np.mean(
             [
                 net.predict_processed(obs, acts, next_obs, dones, update_stats=False)
                 for net in reward_nets_ensemble
             ],
             axis=0,
         )
+        return _reward_scale * (r - _reward_bias)
 
     # SAC hyperparameters
     rl_learning_rate = 3e-4
@@ -592,7 +674,7 @@ if __name__ == "__main__":
     learned_reward_venv = RewardVecEnvWrapper(venv, reward_fn=ensemble_reward_fn)
     rl_policy = SAC(
         "MlpPolicy",
-        learned_reward_venv,
+        env=learned_reward_venv,
         learning_rate=rl_learning_rate,
         learning_starts=rl_learning_starts,
         buffer_size=rl_buffer_size,

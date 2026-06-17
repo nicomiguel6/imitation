@@ -133,7 +133,20 @@ class EpsilonGreedyNoiseInjector(BaseNoiseInjector):
     """Injects epsilon-greedy noise into policy actions.
     
     Tracks number of times noise was injected into policy.
+
+    Args:
+        noise_action_scale: Fraction of the (Box) action range used when sampling
+            the random replacement action. ``1.0`` (default) reproduces the
+            original SSRR/D-REX behavior: a uniform random action over the FULL
+            action space. Values ``< 1.0`` shrink the random action toward the
+            action-space midpoint, producing *graded* degradation instead of an
+            immediate blow-up. This is the lever for plants (e.g. the double
+            integrator) where a single full-range random action saturates the
+            state to its clamp bounds. Discrete action spaces ignore this.
     """
+
+    def __init__(self, noise_action_scale: float = 1.0):
+        self.noise_action_scale = float(noise_action_scale)
 
     def inject_noise(
         self,
@@ -187,11 +200,19 @@ class EpsilonGreedyNoiseInjector(BaseNoiseInjector):
         elif isinstance(action_space, gym.spaces.Box):
             # Continuous actions: shape (n_envs, action_dim)
             action_dim = base_action.shape[1:]
-            
+
+            # Optionally shrink the random action toward the action-space midpoint.
+            # scale == 1.0 -> full-range uniform (original SSRR/D-REX behavior).
+            scale = getattr(self, "noise_action_scale", 1.0)
+            mid = 0.5 * (action_space.high + action_space.low)
+            half = 0.5 * (action_space.high - action_space.low) * scale
+            low_s = mid - half
+            high_s = mid + half
+
             # Generate random actions for noisy environments
             random_actions = np.random.uniform(
-                low=action_space.low,
-                high=action_space.high,
+                low=low_s,
+                high=high_s,
                 size=(noise_mask.sum(), *action_dim),  # Only for noisy envs
             )
             # Convert to tensor and assign to noisy positions

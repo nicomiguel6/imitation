@@ -49,7 +49,8 @@ class NoisePerformanceData:
     noise_levels: np.ndarray  # shape (K,)
     returns_mean: np.ndarray  # shape (K,)
     returns_std: np.ndarray  # shape (K,)
-    returns_all: Optional[np.ndarray] = None  # shape (K, N_i) ragged padded not guaranteed
+    returns_all: Optional[np.ndarray] = None       # shape (N_total,) flat across all buckets
+    noise_levels_all: Optional[np.ndarray] = None  # shape (N_total,) paired with returns_all
 
 
 @dataclasses.dataclass(frozen=True)

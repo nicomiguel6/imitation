@@ -412,6 +412,163 @@ def plot_learned_reward_time_slider(
     return fig, ax, slider
 
 
+def reward_sanity_gate(
+    ensemble: Sequence[BasicRewardNet],
+    observation_space: gym.Space,
+    action_space: gym.Space,
+    reference_trajectory: np.ndarray,
+    *,
+    n_grid: int = 80,
+    n_frames: int = 50,
+    device: str = "cpu",
+    argmax_dist_tol: float = 0.5,
+    on_ref_percentile_thresh: float = 0.75,
+    raise_on_fail: bool = False,
+    verbose: bool = True,
+) -> dict:
+    """Sanity-check a learned reward *before* spending compute on RL.
+
+    The check directly tests whether the ensemble-mean reward is oriented toward
+    the reference trajectory. For a sample of reference frames it sweeps the
+    (position, velocity) grid (holding ref fixed) and measures:
+
+    * ``argmax_dist`` — normalized distance between the grid argmax and the true
+      reference state. ~0 means the reward peaks at the reference (good).
+    * ``on_ref_percentile`` — fraction of grid points whose reward is <= the
+      reward evaluated *at* the reference. ~1 means the reference is (near) the
+      global max (good).
+    * ``flatness`` — reward std divided by |mean| over the grid; tiny values flag
+      a near-constant reward that gives RL no usable gradient.
+
+    The gate passes when the median ``argmax_dist`` <= ``argmax_dist_tol`` AND the
+    median ``on_ref_percentile`` >= ``on_ref_percentile_thresh``.
+
+    Args:
+        ensemble: Trained reward nets (averaged via ``predict_processed``).
+        observation_space: Used for grid bounds. Assumes obs = [pos, vel, ref_pos, ref_vel].
+        action_space: Used to size the (zero) dummy action.
+        reference_trajectory: ``(T, >=2)`` array; columns 0,1 are pos,vel.
+        n_grid: Grid resolution per axis.
+        n_frames: Number of reference frames to sample across the trajectory.
+        device: Torch device string (unused beyond net placement).
+        argmax_dist_tol: Max allowed median normalized argmax distance.
+        on_ref_percentile_thresh: Min allowed median on-reference percentile.
+        raise_on_fail: If True, raise ``RuntimeError`` when the gate fails.
+        verbose: Print a human-readable summary.
+
+    Returns:
+        Dict of aggregate metrics plus a boolean ``"pass"``.
+    """
+    ref = np.asarray(reference_trajectory, dtype=np.float64)
+    if ref.ndim != 2 or ref.shape[1] < 2:
+        raise ValueError("reference_trajectory must be (T, >=2): [pos, vel, ...]")
+
+    obs_low = observation_space.low
+    obs_high = observation_space.high
+    pos_vals = np.linspace(obs_low[0], obs_high[0], n_grid)
+    vel_vals = np.linspace(obs_low[1], obs_high[1], n_grid)
+    pos_grid, vel_grid = np.meshgrid(pos_vals, vel_vals)
+    n_pts = n_grid * n_grid
+    pos_half = 0.5 * float(obs_high[0] - obs_low[0])
+    vel_half = 0.5 * float(obs_high[1] - obs_low[1])
+
+    action_dim = action_space.shape[0]
+    dummy_acts = np.zeros((n_pts + 1, action_dim), dtype=np.float32)
+    dummy_done = np.zeros(n_pts + 1, dtype=np.float32)
+
+    t_count = ref.shape[0]
+    n_frames = min(n_frames, t_count)
+    t_indices = np.linspace(0, t_count - 1, n_frames, dtype=int)
+
+    argmax_dists: List[float] = []
+    on_ref_percentiles: List[float] = []
+    flatness_vals: List[float] = []
+    grid_means: List[float] = []
+    grid_stds: List[float] = []
+
+    for t in t_indices:
+        ref_pos_t = float(ref[t, 0])
+        ref_vel_t = float(ref[t, 1])
+        # Grid states + the exact reference state appended as the final row.
+        obs_flat = np.stack(
+            [
+                np.concatenate([pos_grid.ravel(), [ref_pos_t]]),
+                np.concatenate([vel_grid.ravel(), [ref_vel_t]]),
+                np.full(n_pts + 1, ref_pos_t),
+                np.full(n_pts + 1, ref_vel_t),
+            ],
+            axis=1,
+        ).astype(np.float32)
+        dummy_next = np.zeros_like(obs_flat)
+
+        per_net = np.stack(
+            [
+                net.predict_processed(
+                    obs_flat, dummy_acts, dummy_next, dummy_done, update_stats=False
+                )
+                for net in ensemble
+            ],
+            axis=0,
+        )
+        r = per_net.mean(axis=0)
+        grid_r = r[:-1]
+        on_ref_r = float(r[-1])
+
+        amax = int(np.argmax(grid_r))
+        pa = float(pos_grid.ravel()[amax])
+        va = float(vel_grid.ravel()[amax])
+        dist = np.sqrt(
+            ((pa - ref_pos_t) / max(pos_half, 1e-9)) ** 2
+            + ((va - ref_vel_t) / max(vel_half, 1e-9)) ** 2
+        )
+        argmax_dists.append(float(dist))
+        on_ref_percentiles.append(float(np.mean(grid_r <= on_ref_r)))
+        flatness_vals.append(float(np.std(grid_r) / (abs(np.mean(grid_r)) + 1e-12)))
+        grid_means.append(float(np.mean(grid_r)))
+        grid_stds.append(float(np.std(grid_r)))
+
+    med_dist = float(np.median(argmax_dists))
+    med_pct = float(np.median(on_ref_percentiles))
+    med_flat = float(np.median(flatness_vals))
+    passed = (med_dist <= argmax_dist_tol) and (med_pct >= on_ref_percentile_thresh)
+
+    result = {
+        "pass": bool(passed),
+        "median_argmax_dist": med_dist,
+        "median_on_ref_percentile": med_pct,
+        "median_flatness": med_flat,
+        "frac_frames_argmax_ok": float(np.mean(np.asarray(argmax_dists) <= argmax_dist_tol)),
+        "frac_frames_ref_is_top": float(np.mean(np.asarray(on_ref_percentiles) >= on_ref_percentile_thresh)),
+        "argmax_dist_tol": argmax_dist_tol,
+        "on_ref_percentile_thresh": on_ref_percentile_thresh,
+        # Reward-scale stats (averaged over sampled frames) — useful for picking an
+        # RL-side affine rescale (a*(r-b)) that does not change the optimal policy.
+        "reward_grid_mean": float(np.mean(grid_means)),
+        "reward_grid_std": float(np.mean(grid_stds)),
+    }
+
+    if verbose:
+        status = "PASS" if passed else "FAIL"
+        print("\n=== Reward sanity gate ===")
+        print(f"  median argmax distance to reference = {med_dist:.3f}  (tol <= {argmax_dist_tol})")
+        print(f"  median on-reference percentile      = {med_pct:.3f}  (need >= {on_ref_percentile_thresh})")
+        print(f"  median flatness (std/|mean|)        = {med_flat:.4g}  (tiny => near-constant reward)")
+        print(f"  frames argmax near ref: {result['frac_frames_argmax_ok']*100:.0f}%  | "
+              f"frames ref is top-{int((1-on_ref_percentile_thresh)*100)}%: {result['frac_frames_ref_is_top']*100:.0f}%")
+        print(f"  --> {status}")
+        if not passed:
+            print("  Reward does NOT favor the reference. RL on this reward will likely fail.")
+
+    if not passed and raise_on_fail:
+        raise RuntimeError(
+            f"Reward sanity gate FAILED: median_argmax_dist={med_dist:.3f} "
+            f"(tol {argmax_dist_tol}), median_on_ref_percentile={med_pct:.3f} "
+            f"(thresh {on_ref_percentile_thresh})."
+        )
+
+    return result
+
+
 def load_ssrr_ensemble(
     ensemble_dir: Path,
     observation_space: gym.Space,
@@ -477,10 +634,11 @@ if __name__ == "__main__":
     
     # load ensemble of reward net
     ensemble = load_ssrr_ensemble(
-        ensemble_dir=Path("/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/best_airl"),
+        # ensemble_dir=Path("/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260420_231943_sinusoidal_A1.0_f0.01/best_airl"),
+        ensemble_dir=Path("/home/nicomiguel/imitation/src/imitation/scripts/SSRR/tests/airl_outputs/20260527_231943_sinusoidal_A1.0_f0.01/ssrr_regression/ensemble"),
         observation_space=observation_space,
         action_space=action_space,
-        n_ensemble=1,
+        n_ensemble=3,
         device=device,
     )
 

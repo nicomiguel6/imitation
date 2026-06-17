@@ -84,12 +84,32 @@ class SnippetDataset(Dataset):
 
 def _collate_snippets(
     batch: List[Tuple[np.ndarray, np.ndarray, float]],
-) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
-    # Variable-length snippets: keep as list-of-tensors; we’ll process in a loop.
-    obs_list = [th.from_numpy(b[0]) for b in batch]   # (L+1, obs_dim)
-    act_list = [th.from_numpy(b[1]) for b in batch]   # (L, act_dim)
-    targets = th.tensor([b[2] for b in batch], dtype=th.float32)
-    return obs_list, act_list, targets
+) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    """Flatten all snippet timesteps into single batched tensors for one forward pass.
+
+    Returns:
+        all_cur:          (total_T, obs_dim)
+        all_acts:         (total_T, act_dim)
+        snippet_lengths:  (batch_size,)  — number of timesteps per snippet
+        targets:          (batch_size,)
+    """
+    cur_parts: List[th.Tensor] = []
+    act_parts: List[th.Tensor] = []
+    snippet_lengths: List[int] = []
+    target_list: List[float] = []
+
+    for obs, acts, target in batch:
+        cur_parts.append(th.from_numpy(obs[:-1]).float())
+        act_parts.append(th.from_numpy(acts).float())
+        snippet_lengths.append(len(acts))
+        target_list.append(float(target))
+
+    return (
+        th.cat(cur_parts, dim=0),
+        th.cat(act_parts, dim=0),
+        th.tensor(snippet_lengths, dtype=th.long),
+        th.tensor(target_list, dtype=th.float32),
+    )
 
 
 class SSRRRegressor:
@@ -107,15 +127,6 @@ class SSRRRegressor:
         self.device = th.device(device)
         self.optim = th.optim.Adam(self.reward_net.parameters(), lr=lr, weight_decay=weight_decay)
 
-    def _snippet_return(self, obs: th.Tensor, acts: th.Tensor) -> th.Tensor:
-        # obs: (L+1, obs_dim), acts: (L, act_dim)
-        cur = obs[:-1]
-        nxt = obs[1:]
-        done = th.zeros((acts.shape[0],), device=obs.device, dtype=th.float32)
-        done[-1] = 1.0
-        r = self.reward_net(cur, acts, nxt, done)
-        return th.sum(r)
-
     def train(
         self,
         dataloader: DataLoader,
@@ -129,20 +140,24 @@ class SSRRRegressor:
         it = iter(dataloader)
         for step in tqdm.tqdm(range(1, n_steps + 1)):
             try:
-                obs_list, act_list, targets = next(it)
+                batch = next(it)
             except StopIteration:
                 it = iter(dataloader)
-                obs_list, act_list, targets = next(it)
+                batch = next(it)
 
+            all_cur, all_acts, snippet_lengths, targets = batch
+            all_cur = all_cur.to(self.device)
+            all_acts = all_acts.to(self.device)
             targets = targets.to(self.device)
+
             self.optim.zero_grad()
 
-            preds = []
-            for obs, acts in zip(obs_list, act_list):
-                obs = obs.to(self.device).float()
-                acts = acts.to(self.device).float()
-                preds.append(self._snippet_return(obs, acts))
-            pred_vec = th.stack(preds, dim=0)
+            # Single forward pass over all timesteps from all snippets in the batch.
+            all_rewards = self.reward_net(all_cur, all_acts)  # (total_T,)
+
+            # Split by snippet length, sum rewards within each snippet → (batch_size,)
+            split_rewards = th.split(all_rewards, snippet_lengths.tolist(), dim=0)
+            pred_vec = th.stack([r.sum() for r in split_rewards], dim=0)
 
             loss = th.mean((pred_vec - targets) ** 2)
             if step % log_interval == 0:
@@ -166,4 +181,3 @@ def make_dataloader(
 ) -> DataLoader:
     ds = SnippetDataset(buckets, sigmoid, num_snippets=num_snippets, cfg=cfg, rng=rng)
     return DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=_collate_snippets)
-
