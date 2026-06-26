@@ -512,8 +512,8 @@ if __name__ == "__main__":
     reg_num_snippets = 20_000
 
     # SSRRRegressionConfig controls snippet sampling and target scaling.
-    reg_min_steps = 100
-    reg_max_steps = 200
+    reg_min_steps = 50
+    reg_max_steps = 150
     reg_target_scale = 5.0
     reg_length_normalize = True
     reg_cfg = SSRRRegressionConfig(
